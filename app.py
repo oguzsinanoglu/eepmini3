@@ -5,8 +5,7 @@ Run with:  streamlit run app.py
 """
 
 import os
-import threading
-import time
+import json
 import streamlit as st
 
 # ── Page config — must be first st.* call ─────────────────────
@@ -21,23 +20,55 @@ for _k in ["OPENAI_API_KEY", "ALPHAVANTAGE_API_KEY", "USE_MOCK_AV_API"]:
     if _k in st.secrets and not os.environ.get(_k):
         os.environ[_k] = str(st.secrets[_k])
 
-# ── Start mock AV server once per worker process ─────────────
+# ── Patch requests to intercept mock AV calls (no Flask thread needed) ───────
 @st.cache_resource
-def _start_mock_av_server():
+def _patch_mock_av_requests():
+    """
+    Monkey-patch requests.get to intercept calls to http://127.0.0.1:2345
+    and route them directly to av_mock_server handler functions.
+    Avoids all Flask threading and port-binding issues on Streamlit Cloud.
+
+    Note: finagents.py calls requests.get() (the module-level function), not
+    Session.get(), so we must patch the module-level function.
+    """
     if os.environ.get("USE_MOCK_AV_API") != "1":
         return False
-    import logging
-    logging.getLogger("werkzeug").setLevel(logging.ERROR)
-    from av_mock_server import app as _flask_app
-    t = threading.Thread(
-        target=lambda: _flask_app.run(host="127.0.0.1", port=2345, use_reloader=False),
-        daemon=True,
+    import requests as _req
+    from urllib.parse import urlparse, parse_qs
+    from av_mock_server import (
+        _handle_overview,
+        _handle_market_status,
+        _handle_top_gainers_losers,
+        _handle_news_sentiment,
     )
-    t.start()
-    time.sleep(0.8)   # let Flask bind before finagents starts sending requests
+
+    _orig_get = _req.get
+
+    _HANDLERS = {
+        "OVERVIEW":           _handle_overview,
+        "MARKET_STATUS":      _handle_market_status,
+        "TOP_GAINERS_LOSERS": _handle_top_gainers_losers,
+        "NEWS_SENTIMENT":     _handle_news_sentiment,
+    }
+
+    def _intercepted_get(url, **kwargs):
+        parsed = urlparse(url)
+        if parsed.hostname == "127.0.0.1" and parsed.port == 2345:
+            params = {k: v[0] for k, v in parse_qs(parsed.query, keep_blank_values=True).items()}
+            fn = params.get("function", "")
+            handler = _HANDLERS.get(fn, lambda p: {"error": f"Unknown function: {fn}"})
+            data = handler(params)
+            resp = _req.models.Response()
+            resp.status_code = 200
+            resp._content = json.dumps(data).encode("utf-8")
+            resp.encoding = "utf-8"
+            return resp
+        return _orig_get(url, **kwargs)
+
+    _req.get = _intercepted_get
     return True
 
-_start_mock_av_server()
+_patch_mock_av_requests()
 
 # ── Import agents after env vars are set ─────────────────────
 from finagents import run_single_agent_chat, run_multi_agent_chat, MODEL_SMALL, MODEL_LARGE  # noqa: E402
