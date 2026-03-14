@@ -1,0 +1,7 @@
+*_key.txt
+hf-token.txt
+.streamlit/secrets.toml
+*.db
+__pycache__/
+*.pyc
+.env
