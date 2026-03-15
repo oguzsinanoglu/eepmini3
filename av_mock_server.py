@@ -74,6 +74,7 @@ app = Flask(__name__)
 
 _INFO_CACHE_TTL = 300  # seconds; re-fetch after 5 minutes or on failure
 _info_cache: dict = {}  # ticker -> (fetched_at: float, data: dict | None)
+_delisted_tickers: set = set()  # tickers that returned 404; never retried
 
 def _get_info(ticker):
     """Get fundamentals for one ticker with TTL caching.
@@ -88,6 +89,8 @@ def _get_info(ticker):
     4. Returns None; _handle_overview falls back to fast_info for the basic fields.
     """
     global _LAST_YF_CALL_TIME
+    if ticker in _delisted_tickers:
+        return None
     entry = _info_cache.get(ticker)
     if entry is not None:
         fetched_at, data = entry
@@ -141,6 +144,9 @@ def _get_info(ticker):
                     }
                     _info_cache[ticker] = (time.time(), info)
                     return info
+        elif r.status_code == 404:
+            _delisted_tickers.add(ticker)
+            return None
     except Exception:
         pass
 
@@ -171,6 +177,10 @@ def _handle_overview(params):
         return {}
 
     info = _get_info(ticker)
+
+    # Skip fast_info for tickers already confirmed delisted (avoids yf.history warnings)
+    if ticker in _delisted_tickers:
+        return {}
 
     def safe(val):
         return "None" if val is None else str(val)

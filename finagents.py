@@ -40,6 +40,15 @@ DB_PATH = str(Path(__file__).parent / "stocks.db")
 # Tickers that failed a yfinance download this session
 _DELISTED_CACHE: set = set()
 
+# Merge with av_mock_server's delisted set if already loaded (they share process memory)
+def _get_delisted_cache() -> set:
+    """Return the union of the local cache and av_mock_server's cache."""
+    try:
+        import av_mock_server as _avms
+        return _DELISTED_CACHE | _avms._delisted_tickers
+    except Exception:
+        return _DELISTED_CACHE
+
 
 # ═══════════════════════════════════════════════════════════════
 # Tool Functions
@@ -48,9 +57,9 @@ _DELISTED_CACHE: set = set()
 def get_price_performance(tickers: list, period: str = "1y") -> dict:
     """% price change for a list of tickers over a period."""
     results = {}
-    to_download = [t for t in tickers if t not in _DELISTED_CACHE]
+    to_download = [t for t in tickers if t not in _get_delisted_cache()]
     for t in tickers:
-        if t in _DELISTED_CACHE:
+        if t in _get_delisted_cache():
             results[t] = {"error": "No data — possibly delisted (cached)"}
 
     if not to_download:
@@ -360,9 +369,9 @@ AVAILABLE TOOLS AND WHEN TO USE THEM:
 
 CRITICAL RULES:
 - For sector/industry RANKING questions ("top N stocks by P/E", "best by market cap", etc.):
-  1. query_local_db: SELECT ticker FROM stocks WHERE LOWER(sector) LIKE '%technology%' AND market_cap='Large' ORDER BY ticker LIMIT 10
-     (Adjust sector name. Use market_cap='Large' to keep the call count small.)
-  2. get_company_overview for each ticker returned (at most 8).
+  1. query_local_db: SELECT ticker FROM stocks WHERE LOWER(sector) LIKE '%technology%' AND market_cap='Large' ORDER BY ticker LIMIT 20
+     (Adjust sector name. Use market_cap='Large' to keep the call count small. LIMIT 20 ensures enough survivors after delisted tickers are filtered out.)
+  2. get_company_overview for each ticker returned (at most 15).
   3. Filter out tickers where the metric is "None", sort, and report top-N.
   DO NOT use get_tickers_by_sector for ranking — it returns 60+ tickers and is much slower.
 - For other sector/industry questions (non-ranking): use get_tickers_by_sector or query_local_db to get tickers, THEN fetch data. Never guess tickers.
