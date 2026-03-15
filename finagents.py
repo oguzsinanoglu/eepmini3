@@ -755,10 +755,13 @@ AVAILABLE TOOLS AND WHEN TO USE THEM:
 7. query_local_db — Run SQL on the local stocks database (columns: ticker, company, sector, industry, market_cap, exchange). Use for filtering by market_cap='Large', exchange='NASDAQ', etc.
 
 CRITICAL RULES:
-- For sector/industry RANKING questions ("top N stocks by P/E", "best by market cap", etc.):
+- For sector/industry PRICE RETURN ranking ("top N by 1-year return", "best performers this month/year", etc.):
+  Call rank_sector_by_return(sector=..., period=..., top_n=N).
+  This tool handles DB lookup (works for sub-industries like 'semiconductor' too), downloads all returns, and sorts in Python. DO NOT call get_tickers_by_sector + get_price_performance manually for ranking.
+- For sector/industry FUNDAMENTAL ranking ("top N stocks by P/E", "best by market cap", etc.):
   Call rank_stocks_by_metric(sector=..., metric=..., top_n=N, descending=True).
   This tool handles SQL lookup + data fetching + sorting in Python — the result is already correctly ordered. Report it as-is.
-  DO NOT use get_tickers_by_sector or query_local_db for ranking — use rank_stocks_by_metric.
+  DO NOT use get_tickers_by_sector or query_local_db for fundamental ranking — use rank_stocks_by_metric.
 - For 52-WEEK LOW PROXIMITY questions ("closer to 52-week low", "near 52-week low", "trading near their lows"):
   Call filter_sector_by_52week(sector=...) FIRST. It returns only the qualifying stocks with current_price, week_high_52, week_low_52, and pct_above_low.
   Then call get_news_sentiment for each qualifying ticker (up to 5). DO NOT call get_company_overview separately — all 52-week data is already in the filter result.
@@ -814,7 +817,7 @@ RULES:
    - Questions about news or sentiment (with specific tickers) → "Sentiment" ONLY.
    - Only combine multiple specialists when the question explicitly asks for multiple domains in one answer.
 2. Detect a cross-domain dependency and use phased execution:
-   a) Price-then-fundamentals/sentiment: question ranks/filters by price/return then asks fundamentals or sentiment of top results → set "phased": true, "phase1_agent": "Price". Examples: "top 3 semiconductor stocks by 1-year return, what are their P/E ratios", "best energy stocks this year, show their news sentiment". Sub-task for Price: "Call rank_sector_by_return(sector='[sector]', period='[period]', top_n=[N]). Report exactly the tickers and their returns."
+   a) Price-then-fundamentals/sentiment: question ranks/filters by price/return then asks fundamentals or sentiment of top results → set "phased": true, "phase1_agent": "Price". Examples: "top 3 semiconductor stocks by 1-year return, what are their P/E ratios", "best energy stocks this year, show their news sentiment". Sub-task for Price MUST say exactly: "Call rank_sector_by_return(sector='[sector_from_question]', period='[period]', top_n=[N]). Report the tickers and returns from the results list directly."
    b) 52-week-then-sentiment: question asks which SECTOR stocks are closer to 52-week low AND also requests news sentiment → set "phased": true, "phase1_agent": "Fundamentals", agents: ["Fundamentals", "Sentiment"]. The Fundamentals agent identifies qualifying stocks; Sentiment receives those tickers as a hint.
 3. Write a concise, self-contained sub-task string for each activated specialist. The sub-task must:
    - Include any ticker symbols mentioned in the original question.
@@ -838,12 +841,11 @@ PRICE_AGENT_PROMPT = """You are a market-data specialist with access to price pe
 Answer accurately using only the data your tools return. If a tool fails, say so.
 Do not guess ticker symbols — use get_tickers_by_sector to look them up first when needed.
 
-RANKING PROTOCOL — follow these steps exactly when asked to rank stocks by return:
-1. Call get_price_performance ONCE with ALL relevant tickers in a single call.
-2. Build an internal scratchpad: list EVERY returned ticker and its exact pct_change value.
-3. Sort the scratchpad from highest to lowest pct_change in your reasoning.
-4. Select the top-N entries from the sorted list.
-5. Write your final answer using the EXACT ticker symbol paired with its EXACT pct_change value.
+RANKING PROTOCOL — ALWAYS use this when asked to find top-N stocks in a sector/industry by price return:
+1. Call rank_sector_by_return(sector=<sector_from_task>, period=<period>, top_n=N).
+   This tool handles DB lookup (including sub-industries like 'semiconductor'), downloads returns for ALL tickers, and sorts in Python. The result is already correctly ordered.
+2. Report the tickers and returns DIRECTLY from the "results" list. Use the exact "ticker" and period values from the JSON.
+3. DO NOT call get_tickers_by_sector or get_price_performance manually for any top-N ranking question — rank_sector_by_return does it all.
 
 STRICT TICKER RULES:
 - The KEY in the get_price_performance response IS the ticker. Its value belongs only to that ticker.
