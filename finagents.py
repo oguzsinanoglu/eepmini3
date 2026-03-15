@@ -180,6 +180,7 @@ def get_company_overview(ticker: str) -> dict:
 
 def get_tickers_by_sector(sector: str) -> dict:
     """Return stocks in a sector/industry from the local DB."""
+    sector = _normalize_sector(sector)
     conn = sqlite3.connect(DB_PATH)
     df = pd.read_sql_query(
         "SELECT ticker, company, sector, industry, market_cap "
@@ -200,6 +201,33 @@ def get_tickers_by_sector(sector: str) -> dict:
     return {"stocks": df.to_dict(orient="records")}
 
 
+# Map common colloquial sector names to the exact strings used in sp500_companies.csv
+_SECTOR_ALIASES = {
+    "finance"      : "Financial Services",
+    "financial"    : "Financial Services",
+    "financials"   : "Financial Services",
+    "tech"         : "Technology",
+    "it"           : "Technology",
+    "information technology": "Technology",
+    "comms"        : "Communication Services",
+    "communications": "Communication Services",
+    "telecom"      : "Communication Services",
+    "consumer"     : "Consumer Cyclical",
+    "health"       : "Healthcare",
+    "health care"  : "Healthcare",
+    "material"     : "Basic Materials",
+    "materials"    : "Basic Materials",
+    "industrial"   : "Industrials",
+    "real estate"  : "Real Estate",
+    "reits"        : "Real Estate",
+    "utility"      : "Utilities",
+}
+
+def _normalize_sector(sector: str) -> str:
+    """Map colloquial sector names to the canonical strings in stocks.db."""
+    return _SECTOR_ALIASES.get(sector.strip().lower(), sector)
+
+
 def rank_stocks_by_metric(
     sector: str,
     metric: str = "pe_ratio",
@@ -212,7 +240,7 @@ def rank_stocks_by_metric(
 
     metric: one of 'pe_ratio', 'eps', 'market_cap' (MarketCapitalization), 'week_high_52'.
     """
-    # 1. Get candidate tickers from DB
+    sector = _normalize_sector(sector)
     conn = sqlite3.connect(DB_PATH)
     df = pd.read_sql_query(
         "SELECT ticker FROM stocks "
