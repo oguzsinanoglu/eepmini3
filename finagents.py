@@ -691,8 +691,8 @@ OUTPUT RULES:
 
 1. TABLE FORMAT — use ONLY when ALL of these are true:
    a) price_returns contains 2 or more tickers, AND
-   b) the original_question explicitly asks for price % change or performance (e.g. "which gained most", "top performers", "price change").
-   DO NOT use TABLE FORMAT for questions about 52-week range, P/E, sentiment, or any question where price % is just used internally as a filter.
+   b) the original_question explicitly asks to COMPARE price % change across tickers (e.g. "which gained most", "top performers", "best/worst performing", "price change").
+   DO NOT use TABLE FORMAT for: 52-week range questions, P/E questions, sentiment questions, or any MULTI-CONDITION FILTER question (e.g. "dropped this month but grew this year", "fell recently but up this year"). Those use PROSE FORMAT.
    - Output exactly one line per ticker. FORMAT: TICKER: +X.XX% | P/E X.XX | Sentiment: Label (score)
    - Use the exact float from price_returns for %. Prefix positive with +.
    - Get P/E and Sentiment from specialist_answers. Write N/A only if truly absent.
