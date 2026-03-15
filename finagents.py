@@ -715,7 +715,10 @@ C) SECTOR RANKING (top-N): List top-N from sorted scratchpad: 1. TICKER: +X.XX%
 MULTI-CONDITION FILTERING PROTOCOL — for two-period filter questions (e.g., "dropped this month but grew this year"):
 1. Call filter_sector_by_return_conditions(sector=..., period1=..., condition1=..., period2=..., condition2=..., top_n=N).
    This tool fetches ALL sector tickers, downloads both periods, filters and sorts in Python — the result is already correct.
-2. Report the results directly. Do NOT call get_tickers_by_sector or get_price_performance manually for this type of question.
+2. Report the results directly using the EXACT float values from the tool's "results" list. For each entry, output one line:
+   TICKER: 1mo [period1 value]% | YTD [period2 value]%
+   where [period1 value] and [period2 value] are the actual numbers returned in the JSON (e.g. -3.21, +18.44). NEVER write placeholder text.
+3. Do NOT call get_tickers_by_sector or get_price_performance manually for this type of question.
 
 Always report the exact numeric pct_change for every stock you mention."""
 
@@ -798,7 +801,7 @@ OUTPUT RULES:
    - For 52-WEEK RANGE FILTER: output EXACTLY ONE LINE per stock, then a blank line before the next stock. Format per stock:
      TICKER (Company Name): current $X.XX | 52-week $LOW - $HIGH | X.XX% above low | Sentiment: Label (score), Label (score), ...
      Always include the company name in parentheses — it is present in the specialist answer. Every stock MUST start on its own new line. No two stocks on the same line.
-   - For MULTI-CONDITION PRICE FILTER ("dropped this month but grew this year", "top N by return", etc.): list every qualifying stock with both period values. FORMAT per stock: N. TICKER: 1mo X.XX% | YTD X.XX%. No company names needed. If the answer says no stocks qualified, relay that verbatim.
+   - For MULTI-CONDITION PRICE FILTER ("dropped this month but grew this year", "top N by return", etc.): list every qualifying stock with BOTH actual numeric values from the tool output. Each stock on its own line. Example (using made-up numbers): "1. AAPL: 1mo -3.21% | YTD +15.44%". Replace the numbers with the EXACT float values returned by the tool — do NOT write placeholder text like X.XX. No company names needed. If the answer says no stocks qualified, relay that verbatim.
    - Draw facts from specialist_answers only.
    - No markdown, no bullet points, no headers.
    - Use numerical values exactly as provided.
