@@ -592,7 +592,7 @@ RULES:
    - Include the EXACT sector name from the original question verbatim (e.g. if the question says "finance sector", the sub-task must say "finance sector", not "financial sector", not "Financial Services", not any other substitution). The specialist agent resolves the canonical name itself.
 4. Return ONLY valid JSON — no prose before or after.
 5. Always activate at least one specialist — never return an empty "agents" list. If the question is purely about DB/sector lookup (e.g., "list companies in database"), activate "Price" (it has get_tickers_by_sector).
-6. For questions requiring TWO time-period conditions on the SAME stocks (e.g., "dropped this month but grew this year"), set "phased": false, assign ONLY "Price", and write the sub-task as: "Fetch 1mo AND ytd performance for [sector] tickers. Filter: 1mo<0 AND ytd>0. Return top 3 by ytd."
+6. For questions requiring TWO time-period conditions on the SAME stocks (e.g., "dropped this month but grew this year", "fell recently but up this year", "which stocks went up/down over two periods"): this is ALWAYS a Price question. Set "phased": false, assign ONLY "Price". DO NOT route to Fundamentals even if the question says "top N" — the top-N here ranks by price return, not by P/E or market cap. Sub-task template: "Fetch 1mo AND ytd performance for [sector] tickers. Filter: 1mo<0 AND ytd>0. Return top 3 by ytd."
 
 Return format:
 {
@@ -698,7 +698,8 @@ OUTPUT RULES:
    - Get P/E and Sentiment from specialist_answers. Write N/A only if truly absent.
    - No company names, no intro sentence, no conclusion, no blank lines.
 
-2. RANKING FORMAT — use when the question asks to rank or find "top N" stocks by a metric (P/E, market cap, EPS, etc.) and price_returns is empty:
+2. RANKING FORMAT — use ONLY when the question asks to rank stocks by a FUNDAMENTAL metric (P/E, EPS, market cap, dividend yield, etc.) and price_returns is empty.
+   DO NOT use RANKING FORMAT for price-return rankings ("most gained", "top performers", "dropped this month", "grew this year", "top N by return") — use PROSE FORMAT for those instead.
    - One line per stock. FORMAT: N. TICKER (Company Name): P/E X.XX | EPS X.XX | Market Cap $X.XXB
    - Always include the company name in parentheses after the ticker. If not available, omit the parentheses.
    - Include only the fields the question asks about plus any extra fields present in the specialist answer. Omit fields that are "None" or "N/A".
@@ -711,7 +712,7 @@ OUTPUT RULES:
    - For 52-WEEK RANGE FILTER: output EXACTLY ONE LINE per stock, then a blank line before the next stock. Format per stock:
      TICKER (Company Name): current $X.XX | 52-week $LOW - $HIGH | X.XX% above low | Sentiment: Label (score), Label (score), ...
      Always include the company name in parentheses — it is present in the specialist answer. Every stock MUST start on its own new line. No two stocks on the same line.
-   - For MULTI-CONDITION FILTER: list every qualifying stock with BOTH 1-month % AND YTD %.
+   - For MULTI-CONDITION PRICE FILTER ("dropped this month but grew this year", "top N by return", etc.): list every qualifying stock with rank, 1-month %, and YTD %. FORMAT per stock: N. TICKER: 1mo X.XX% | YTD X.XX%. No company names needed.
    - Draw facts from specialist_answers only.
    - No markdown, no bullet points, no headers.
    - Use numerical values exactly as provided.
