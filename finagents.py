@@ -450,13 +450,14 @@ FUNDAMENTALS_AGENT_PROMPT = """You are a fundamental analysis specialist with ac
 Answer accurately using only the data your tools return. If a tool fails, say so.
 Present all values clearly with the field name (e.g. "P/E ratio: 28.5").
 
-SECTOR RANKING PROTOCOL — follow these steps when asked to rank/find top stocks in a sector:
-1. Call get_tickers_by_sector to retrieve all tickers in the sector.
-2. Call get_company_overview for each ticker returned (pick the first 10 if the list is large).
+SECTOR RANKING PROTOCOL — follow these steps EXACTLY when asked to rank/find top stocks in a sector by P/E:
+1. Call query_local_db with: SELECT ticker FROM stocks WHERE LOWER(sector) LIKE '%technology%' AND market_cap='Large' ORDER BY ticker LIMIT 10
+   (Adjust the sector name to match the question. Use market_cap='Large' to limit calls.)
+2. Call get_company_overview for each ticker in the result (at most 8 tickers).
 3. Filter out any tickers where PERatio is "None" or missing.
-4. Sort the remaining tickers by PERatio and report the top-N requested.
+4. Sort the remaining tickers by PERatio (ascending = cheapest, descending = most expensive) and report the top-N requested.
 
-IMPORTANT: When no tickers are listed in your task, use get_tickers_by_sector to look them up first."""
+IMPORTANT: When no tickers are listed in your task, always use query_local_db with a Large market_cap filter first before calling get_company_overview."""
 
 SENTIMENT_AGENT_PROMPT = """You are a news and sentiment specialist with access to real-time news headlines and sentiment scores for individual stocks.
 Summarise sentiment clearly: Bullish / Bearish / Neutral with score.

@@ -16,36 +16,49 @@ Usage:
 from flask import Flask, request, jsonify
 import yfinance as yf
 import requests as _req_module
+import threading
 import random
 import time
 import traceback
 from datetime import datetime
 from pytz import timezone
 
-# Browser User-Agent — avoids Yahoo Finance rate-limiting datacenter IPs
-_YF_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/122.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-}
+# ── Shared yfinance session (preserves cookies/crumb across calls) ────────────
+_SESSION_LOCK = threading.Lock()
+_SHARED_YF_SESSION = None
+
+def _get_shared_session():
+    """Return (or lazily create) a single shared session for all yfinance calls.
+    curl_cffi impersonates Chrome's full TLS fingerprint. Falls back to
+    requests.Session with a browser User-Agent if curl_cffi is unavailable."""
+    global _SHARED_YF_SESSION
+    if _SHARED_YF_SESSION is not None:
+        return _SHARED_YF_SESSION
+    with _SESSION_LOCK:
+        if _SHARED_YF_SESSION is None:  # double-checked locking
+            try:
+                from curl_cffi import requests as _curl_requests
+                _SHARED_YF_SESSION = _curl_requests.Session(impersonate="chrome120")
+            except ImportError:
+                s = _req_module.Session()
+                s.headers.update({
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/122.0.0.0 Safari/537.36"
+                    ),
+                })
+                _SHARED_YF_SESSION = s
+    return _SHARED_YF_SESSION
 
 def _yf_ticker(symbol: str) -> yf.Ticker:
-    """Return a yfinance Ticker using curl_cffi Chrome impersonation.
-    curl_cffi replicates Chrome's TLS fingerprint (JA3), which defeats
-    Yahoo Finance's datacenter-IP blocking that a plain requests.Session
-    cannot bypass even with a browser User-Agent header.
-    Falls back to a plain requests.Session if curl_cffi is unavailable."""
-    try:
-        from curl_cffi import requests as _curl_requests
-        session = _curl_requests.Session(impersonate="chrome120")
-    except ImportError:
-        session = _req_module.Session()
-        session.headers.update(_YF_HEADERS)
-    return yf.Ticker(symbol, session=session)
+    """Return a yfinance Ticker backed by the shared session."""
+    return yf.Ticker(symbol, session=_get_shared_session())
+
+# ── Thread-safe rate limiter for Yahoo Finance calls ─────────────────────────
+_YF_RATE_LOCK = threading.Lock()
+_LAST_YF_CALL_TIME = 0.0
+_MIN_YF_CALL_GAP   = 0.4  # seconds between calls; keeps bursts under Yahoo's threshold
 
 app = Flask(__name__)
 
@@ -53,14 +66,22 @@ _INFO_CACHE_TTL = 300  # seconds; re-fetch after 5 minutes or on failure
 _info_cache: dict = {}  # ticker -> (fetched_at: float, data: dict | None)
 
 def _get_info(ticker):
-    """yfinance .info with TTL caching and browser User-Agent session.
+    """yfinance .info with TTL caching and thread-safe rate limiting.
     Failed/None results are NOT cached so they are retried on the next call.
-    Retries 3× with 1 s delay to handle transient rate-limit rejections."""
+    Retries 3× with 1 s delay to handle transient errors."""
+    global _LAST_YF_CALL_TIME
     entry = _info_cache.get(ticker)
     if entry is not None:
         fetched_at, data = entry
         if time.time() - fetched_at < _INFO_CACHE_TTL:
             return data
+
+    # Enforce minimum gap between Yahoo Finance calls (across all threads)
+    with _YF_RATE_LOCK:
+        elapsed = time.time() - _LAST_YF_CALL_TIME
+        if elapsed < _MIN_YF_CALL_GAP:
+            time.sleep(_MIN_YF_CALL_GAP - elapsed)
+        _LAST_YF_CALL_TIME = time.time()
 
     t = _yf_ticker(ticker)
     for attempt in range(3):
