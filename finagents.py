@@ -778,7 +778,8 @@ CONVERSATIONAL CONTEXT: If the user refers to "that", "it", "the two", or simila
 
 OUTPUT FORMAT:
 - For ranking questions ("top N by P/E", "best by market cap", etc.): one line per stock. FORMAT: N. TICKER (Company Name): P/E X.XX | EPS X.XX | Market Cap $X.XXB. No intro, no conclusion.
-- For 52-week proximity questions: one block per stock. FORMAT: TICKER (Company Name): current $X.XX | 52-week $LOW - $HIGH | X.XX% above low. News: [headline label (score), ...]. Separate stocks with a blank line.
+- For 52-week LOW PROXIMITY sector filter results (filter_sector_by_52week output): one block per stock. Fill in ALL numeric values from the tool result — do NOT write 'X.XX' as a placeholder. FORMAT: TICKER (Company Name): current $X.XX | 52-week $LOW - $HIGH | X.XX% above low. Add news only if get_news_sentiment was called. Separate stocks with a blank line.
+- For direct 52-week HIGH/LOW range queries (user asks for the range of specific named tickers): one line per ticker. FORMAT: TICKER (Company Name): 52-week $LOW - $HIGH. Use the exact values from get_company_overview. Do NOT add current price, % above low, or sentiment.
 - For single-ticker questions: report the key metric(s) asked for plus 52-week range in 2-3 sentences max.
 - For all other questions: answer concisely in plain prose, no bullet points, no markdown headers."""
 
@@ -954,9 +955,10 @@ OUTPUT RULES:
    - Include ALL key numeric values from the specialist answers.
    - For SENTIMENT: list EVERY headline with its exact label and score.
    - For SINGLE-TICKER PRICE: report start, end, AND % change.
-   - For 52-WEEK RANGE FILTER: output EXACTLY ONE LINE per stock, then a blank line before the next stock. Format per stock:
-     TICKER (Company Name): current $X.XX | 52-week $LOW - $HIGH | X.XX% above low | Sentiment: Label (score), Label (score), ...
-     Always include the company name in parentheses — it is present in the specialist answer. Every stock MUST start on its own new line. No two stocks on the same line.
+   - For 52-WEEK PROXIMITY SECTOR FILTER (specialist answer contains pct_above_low data): output EXACTLY ONE LINE per stock, then a blank line. Format per stock:
+     TICKER (Company Name): current $X.XX | 52-week $LOW - $HIGH | X.XX% above low
+     Append `| Sentiment: Label (score), Label (score), ...` ONLY if a Sentiment agent returned actual non-N/A scores. NEVER append `| Sentiment: N/A`. Every stock MUST start on its own new line.
+   - For direct 52-WEEK HIGH/LOW queries (user asked for the 52-week range of specific named tickers, no sector filter): one line per ticker. Format: TICKER (Company Name): 52-week $LOW - $HIGH. Do NOT add current price, % above low, or Sentiment unless the question explicitly asked for them.
    - For MULTI-CONDITION PRICE FILTER ("dropped this month but grew this year", "top N by return", etc.): list every qualifying stock with BOTH actual numeric values from the tool output. Each stock on its own line. Example (using made-up numbers): "1. AAPL (Apple Inc.): 1mo -3.21% | YTD +15.44%". Use the "name" field from the tool result for the company name in parentheses. Replace the numbers with the EXACT values returned by the tool — do NOT write placeholder text like X.XX. If the answer says no stocks qualified, relay that verbatim.
    - For SINGLE-PERIOD THRESHOLD FILTER ("grown more than X% this year", "up at least X%", "gained over X%"): list every qualifying stock with its actual numeric return. Each stock on its own line. Example (using made-up numbers): "1. AAPL (Apple Inc.): YTD +38.42%". Use the "name" field from the tool result for the company name in parentheses. Replace the numbers with the EXACT values from the specialist answer — do NOT write placeholder text.
    - Draw facts from specialist_answers only.
