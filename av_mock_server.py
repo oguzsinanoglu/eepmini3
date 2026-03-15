@@ -76,9 +76,17 @@ _INFO_CACHE_TTL = 300  # seconds; re-fetch after 5 minutes or on failure
 _info_cache: dict = {}  # ticker -> (fetched_at: float, data: dict | None)
 
 def _get_info(ticker):
-    """yfinance .info with TTL caching and thread-safe rate limiting.
-    Failed/None results are NOT cached so they are retried on the next call.
-    Retries 3× with 1 s delay to handle transient errors."""
+    """Get fundamentals for one ticker with TTL caching.
+
+    Strategy order (no blocking delays anywhere):
+    1. Cache hit — return immediately.
+    2. Targeted HTTP quoteSummary: requests ONLY summaryDetail+defaultKeyStatistics.
+       The shared session already has Yahoo cookies from prior fast_info calls, so
+       this lighter 2-module request succeeds even when the full multi-module
+       ticker.info is rate-limited on cloud IPs.
+    3. Full ticker.info — one quick attempt, no sleep.
+    4. Returns None; _handle_overview falls back to fast_info for the basic fields.
+    """
     global _LAST_YF_CALL_TIME
     entry = _info_cache.get(ticker)
     if entry is not None:
@@ -86,7 +94,7 @@ def _get_info(ticker):
         if time.time() - fetched_at < _INFO_CACHE_TTL:
             return data
 
-    # Enforce minimum gap only during concurrent multi-agent execution
+    # Rate limiting only during concurrent multi-agent parallel execution
     if _RATE_LIMIT_ENABLED:
         with _YF_RATE_LOCK:
             elapsed = time.time() - _LAST_YF_CALL_TIME
@@ -94,17 +102,56 @@ def _get_info(ticker):
                 time.sleep(_MIN_YF_CALL_GAP - elapsed)
             _LAST_YF_CALL_TIME = time.time()
 
-    t = _yf_ticker(ticker)
-    for attempt in range(3):
-        try:
-            data = t.get_info() if hasattr(t, "get_info") else t.info
-            if data and data.get("shortName"):
-                _info_cache[ticker] = (time.time(), data)
-                return data
-        except Exception:
-            pass
-        if attempt < 2:
-            time.sleep(1)
+    sess = _get_shared_session()
+    t    = _yf_ticker(ticker)
+
+    # Strategy 1: targeted 2-module quoteSummary via shared session
+    _QS_URL = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
+    try:
+        r = sess.get(
+            _QS_URL,
+            params={"modules": "summaryDetail,defaultKeyStatistics", "formatted": "false"},
+            headers={"Accept": "application/json"},
+            timeout=8,
+        )
+        if r.status_code == 200:
+            parts = (r.json().get("quoteSummary") or {}).get("result") or []
+            if parts:
+                combined = {}
+                for part in parts:
+                    combined.update(part)
+                sd  = combined.get("summaryDetail", {})
+                ks  = combined.get("defaultKeyStatistics", {})
+                pe  = sd.get("trailingPE") or sd.get("forwardPE")
+                eps = ks.get("trailingEps") or ks.get("forwardEps")
+                if pe is not None:
+                    fi = t.fast_info
+                    info = {
+                        "shortName"       : ticker,
+                        "sector"          : "N/A",
+                        "industry"        : "N/A",
+                        "trailingPE"      : sd.get("trailingPE"),
+                        "forwardPE"       : sd.get("forwardPE"),
+                        "trailingEps"     : eps,
+                        "marketCap"       : getattr(fi, "market_cap",         None),
+                        "fiftyTwoWeekHigh": getattr(fi, "fifty_two_week_high", None),
+                        "fiftyTwoWeekLow" : getattr(fi, "fifty_two_week_low",  None),
+                        "beta"            : sd.get("beta"),
+                        "dividendYield"   : sd.get("dividendYield"),
+                    }
+                    _info_cache[ticker] = (time.time(), info)
+                    return info
+    except Exception:
+        pass
+
+    # Strategy 2: full ticker.info — one quick attempt, no delay
+    try:
+        data = t.get_info() if hasattr(t, "get_info") else t.info
+        if data and data.get("shortName"):
+            _info_cache[ticker] = (time.time(), data)
+            return data
+    except Exception:
+        pass
 
     return None  # not cached — will be retried on next call
 

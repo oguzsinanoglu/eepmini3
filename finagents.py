@@ -359,7 +359,13 @@ AVAILABLE TOOLS AND WHEN TO USE THEM:
 7. query_local_db — Run SQL on the local stocks database (columns: ticker, company, sector, industry, market_cap, exchange). Use for filtering by market_cap='Large', exchange='NASDAQ', etc.
 
 CRITICAL RULES:
-- For sector/industry questions: FIRST look up tickers with get_tickers_by_sector or query_local_db, THEN fetch data for those tickers. Never guess tickers.
+- For sector/industry RANKING questions ("top N stocks by P/E", "best by market cap", etc.):
+  1. query_local_db: SELECT ticker FROM stocks WHERE LOWER(sector) LIKE '%technology%' AND market_cap='Large' ORDER BY ticker LIMIT 10
+     (Adjust sector name. Use market_cap='Large' to keep the call count small.)
+  2. get_company_overview for each ticker returned (at most 8).
+  3. Filter out tickers where the metric is "None", sort, and report top-N.
+  DO NOT use get_tickers_by_sector for ranking — it returns 60+ tickers and is much slower.
+- For other sector/industry questions (non-ranking): use get_tickers_by_sector or query_local_db to get tickers, THEN fetch data. Never guess tickers.
 - For comparison questions: Fetch data for ALL tickers mentioned, then compare.
 - For multi-condition questions (e.g., "dropped this month but grew this year"): Fetch data for BOTH time periods, then filter and compare.
 - When a tool returns data, TRUST it and report it directly.
