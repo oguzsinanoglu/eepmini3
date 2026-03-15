@@ -357,13 +357,13 @@ def filter_sector_by_return_conditions(
     conn = sqlite3.connect(DB_PATH)
     if market_cap:
         df = pd.read_sql_query(
-            "SELECT ticker FROM stocks "
+            "SELECT ticker, company FROM stocks "
             "WHERE LOWER(sector) LIKE ('%' || LOWER(?) || '%') "
             "  AND market_cap = ? ORDER BY ticker LIMIT 60",
             conn, params=[sector, market_cap])
     else:
         df = pd.read_sql_query(
-            "SELECT ticker FROM stocks "
+            "SELECT ticker, company FROM stocks "
             "WHERE LOWER(sector) LIKE ('%' || LOWER(?) || '%') "
             "ORDER BY ticker LIMIT 60",
             conn, params=[sector])
@@ -372,6 +372,7 @@ def filter_sector_by_return_conditions(
     if df.empty:
         return {"error": f"No stocks found for sector '{sector}'"}
 
+    name_map = dict(zip(df["ticker"], df["company"]))
     tickers = df["ticker"].tolist()
 
     r1 = get_price_performance(tickers, period=period1)
@@ -393,13 +394,17 @@ def filter_sector_by_return_conditions(
         p1 = _pct(r1, t)
         p2 = _pct(r2, t)
         if _passes(p1, condition1) and _passes(p2, condition2):
-            rows.append({"ticker": t, period1: round(p1, 2), period2: round(p2, 2)})
+            rows.append({"ticker": t, "_p1": p1, "_p2": p2})
 
-    sort_field = period1 if sort_by == "period1" else period2
+    sort_field = "_p1" if sort_by == "period1" else "_p2"
     rows.sort(key=lambda r: r[sort_field], reverse=(condition2 == "positive"))
 
+    formatted = [
+        {"ticker": r["ticker"], "name": name_map.get(r["ticker"], ""), period1: f"{r['_p1']:+.2f}", period2: f"{r['_p2']:+.2f}"}
+        for r in rows[:top_n]
+    ]
     return {
-        "results": rows[:top_n],
+        "results": formatted,
         "total_qualifying": len(rows),
         "sector": sector,
         "filter": f"{period1} {condition1} AND {period2} {condition2}",
@@ -421,13 +426,13 @@ def filter_sector_by_min_return(
     conn = sqlite3.connect(DB_PATH)
     if market_cap:
         df = pd.read_sql_query(
-            "SELECT ticker FROM stocks "
+            "SELECT ticker, company FROM stocks "
             "WHERE LOWER(sector) LIKE ('%' || LOWER(?) || '%') "
             "  AND market_cap = ? ORDER BY ticker LIMIT 60",
             conn, params=[sector, market_cap])
     else:
         df = pd.read_sql_query(
-            "SELECT ticker FROM stocks "
+            "SELECT ticker, company FROM stocks "
             "WHERE LOWER(sector) LIKE ('%' || LOWER(?) || '%') "
             "ORDER BY ticker LIMIT 60",
             conn, params=[sector])
@@ -436,6 +441,7 @@ def filter_sector_by_min_return(
     if df.empty:
         return {"error": f"No stocks found for sector '{sector}'"}
 
+    name_map = dict(zip(df["ticker"], df["company"]))
     tickers = df["ticker"].tolist()
     perf = get_price_performance(tickers, period=period)
 
@@ -445,11 +451,15 @@ def filter_sector_by_min_return(
         if isinstance(v, dict) and "pct_change" in v:
             pct = float(v["pct_change"])
             if pct >= min_pct:
-                rows.append({"ticker": t, period: round(pct, 2)})
+                rows.append({"ticker": t, "_pct": pct})
 
-    rows.sort(key=lambda r: r[period], reverse=True)
+    rows.sort(key=lambda r: r["_pct"], reverse=True)
+    formatted = [
+        {"ticker": r["ticker"], "name": name_map.get(r["ticker"], ""), period: f"{r['_pct']:+.2f}"}
+        for r in rows[:top_n]
+    ]
     return {
-        "results": rows[:top_n],
+        "results": formatted,
         "total_qualifying": len(rows),
         "sector": sector,
         "filter": f"{period} >= {min_pct}%",
@@ -781,16 +791,16 @@ MULTI-CONDITION FILTERING PROTOCOL — for two-period filter questions (e.g., "d
 1. Call filter_sector_by_return_conditions(sector=..., period1=..., condition1=..., period2=..., condition2=..., top_n=N).
    This tool fetches ALL sector tickers, downloads both periods, filters and sorts in Python — the result is already correct.
 2. Report the results directly using the EXACT float values from the tool's "results" list. For each entry, output one line:
-   TICKER: 1mo [period1 value]% | YTD [period2 value]%
-   where [period1 value] and [period2 value] are the actual numbers returned in the JSON (e.g. -3.21, +18.44). NEVER write placeholder text.
+   TICKER (Company Name): 1mo [period1 value]% | YTD [period2 value]%
+   where [period1 value] and [period2 value] are the actual numbers returned in the JSON (e.g. -3.21, +18.44), and Company Name comes from the "name" field. NEVER write placeholder text.
 3. Do NOT call get_tickers_by_sector or get_price_performance manually for this type of question.
 
 SINGLE-PERIOD THRESHOLD FILTER PROTOCOL — for questions like "which stocks grew more than 20% this year" or "up at least 15% this month":
 1. Call filter_sector_by_min_return(sector=..., period=..., min_pct=..., top_n=N).
    This tool fetches ALL sector tickers, downloads the period, filters >= min_pct in Python, and returns sorted results.
 2. Report the results directly using the EXACT float values from the tool's "results" list. For each entry, output one line:
-   TICKER: [period] [value]%
-   using the actual number from the JSON (e.g. 42.67). NEVER write placeholder text.
+   TICKER (Company Name): [period] [value]%
+   using the actual number from the JSON (e.g. +42.67) and the "name" field for the company name. NEVER write placeholder text.
 3. Do NOT call get_tickers_by_sector or get_price_performance manually for this type of question.
 
 Always report the exact numeric pct_change for every stock you mention."""
@@ -874,8 +884,8 @@ OUTPUT RULES:
    - For 52-WEEK RANGE FILTER: output EXACTLY ONE LINE per stock, then a blank line before the next stock. Format per stock:
      TICKER (Company Name): current $X.XX | 52-week $LOW - $HIGH | X.XX% above low | Sentiment: Label (score), Label (score), ...
      Always include the company name in parentheses — it is present in the specialist answer. Every stock MUST start on its own new line. No two stocks on the same line.
-   - For MULTI-CONDITION PRICE FILTER ("dropped this month but grew this year", "top N by return", etc.): list every qualifying stock with BOTH actual numeric values from the tool output. Each stock on its own line. Example (using made-up numbers): "1. AAPL: 1mo -3.21% | YTD +15.44%". Replace the numbers with the EXACT float values returned by the tool — do NOT write placeholder text like X.XX. No company names needed. If the answer says no stocks qualified, relay that verbatim.
-   - For SINGLE-PERIOD THRESHOLD FILTER ("grown more than X% this year", "up at least X%", "gained over X%"): list every qualifying stock with its actual numeric return. Each stock on its own line. Example (using made-up numbers): "1. AAPL: YTD +38.42%". Replace the numbers with the EXACT float values from the specialist answer — do NOT write placeholder text. No company names needed.
+   - For MULTI-CONDITION PRICE FILTER ("dropped this month but grew this year", "top N by return", etc.): list every qualifying stock with BOTH actual numeric values from the tool output. Each stock on its own line. Example (using made-up numbers): "1. AAPL (Apple Inc.): 1mo -3.21% | YTD +15.44%". Use the "name" field from the tool result for the company name in parentheses. Replace the numbers with the EXACT values returned by the tool — do NOT write placeholder text like X.XX. If the answer says no stocks qualified, relay that verbatim.
+   - For SINGLE-PERIOD THRESHOLD FILTER ("grown more than X% this year", "up at least X%", "gained over X%"): list every qualifying stock with its actual numeric return. Each stock on its own line. Example (using made-up numbers): "1. AAPL (Apple Inc.): YTD +38.42%". Use the "name" field from the tool result for the company name in parentheses. Replace the numbers with the EXACT values from the specialist answer — do NOT write placeholder text.
    - Draw facts from specialist_answers only.
    - No markdown, no bullet points, no headers.
    - Use numerical values exactly as provided.
