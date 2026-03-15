@@ -1098,6 +1098,69 @@ def _extract_tickers_from_result(result: AgentResult, top_n: int = 3) -> list:
     return [t[0] for t in tickers[:top_n]]
 
 
+def _try_direct_tool_call(task: str) -> AgentResult | None:
+    """If the orchestrator sub-task explicitly says to call a deterministic Python tool,
+    execute it directly without an LLM agent loop to guarantee consistent results.
+    Handles: rank_sector_by_return, filter_sector_by_return_conditions, filter_sector_by_min_return.
+    Returns a synthetic AgentResult, or None if no matching call is found in the task string.
+    """
+    import re
+
+    def _parse_kwargs(args_str: str) -> dict:
+        """Parse key=value pairs from a function call argument string."""
+        kwargs = {}
+        for m in re.finditer(r"(\w+)\s*=\s*(?:'([^']*)'|\"([^\"]*)\"|([0-9.]+))", args_str):
+            k = m.group(1)
+            v = m.group(2) or m.group(3) or m.group(4)
+            if k in ("top_n",):
+                kwargs[k] = int(float(v))
+            elif k in ("min_pct",):
+                kwargs[k] = float(v)
+            else:
+                kwargs[k] = v
+        return kwargs
+
+    def _make_result(fn_name: str, result: dict) -> AgentResult:
+        rows = result.get("results", result.get("qualifying", []))
+        lines = []
+        for row in rows:
+            ticker = row.get("ticker", "")
+            name   = row.get("name", "")
+            vals   = {k: v for k, v in row.items() if k not in ("ticker", "name")}
+            val_str = " | ".join(f"{k} {v}" for k, v in vals.items())
+            lines.append(f"{ticker} ({name}): {val_str}" if name else f"{ticker}: {val_str}")
+        answer = "\n".join(lines) if lines else "No results found."
+        return AgentResult(
+            agent_name="Price Agent",
+            answer=answer,
+            tools_called=[fn_name],
+            raw_data={f"{fn_name}_1": result},
+        )
+
+    # rank_sector_by_return(...)
+    m = re.search(r"rank_sector_by_return\((.*?)\)", task, re.IGNORECASE | re.DOTALL)
+    if m:
+        kwargs = _parse_kwargs(m.group(1))
+        if "sector" in kwargs:
+            return _make_result("rank_sector_by_return", rank_sector_by_return(**kwargs))
+
+    # filter_sector_by_return_conditions(...)
+    m = re.search(r"filter_sector_by_return_conditions\((.*?)\)", task, re.IGNORECASE | re.DOTALL)
+    if m:
+        kwargs = _parse_kwargs(m.group(1))
+        if "sector" in kwargs:
+            return _make_result("filter_sector_by_return_conditions", filter_sector_by_return_conditions(**kwargs))
+
+    # filter_sector_by_min_return(...)
+    m = re.search(r"filter_sector_by_min_return\((.*?)\)", task, re.IGNORECASE | re.DOTALL)
+    if m:
+        kwargs = _parse_kwargs(m.group(1))
+        if "sector" in kwargs:
+            return _make_result("filter_sector_by_min_return", filter_sector_by_min_return(**kwargs))
+
+    return None
+
+
 def run_multi_agent(question: str, verbose: bool = False) -> dict:
     """Orchestrator → Parallel Specialists → Critic → Synthesizer pipeline."""
     t0 = time.time()
@@ -1117,7 +1180,10 @@ def run_multi_agent(question: str, verbose: bool = False) -> dict:
     if plan.get("phased") and plan.get("phase1_agent"):
         p1_name = plan["phase1_agent"]
         p1_task = plan["task_per_agent"].get(p1_name, question)
-        p1_result = SPECIALIST_RUNNERS[p1_name](p1_task, verbose=verbose)
+        # If the sub-task explicitly names a deterministic Python tool, call it
+        # directly — do not route through the LLM agent loop to ensure consistency.
+        direct = _try_direct_tool_call(p1_task) if p1_name == "Price" else None
+        p1_result = direct if direct is not None else SPECIALIST_RUNNERS[p1_name](p1_task, verbose=verbose)
         agent_results.append(p1_result)
 
         _p1_top_n = 8 if p1_name == "Fundamentals" else 3
@@ -1146,14 +1212,15 @@ def run_multi_agent(question: str, verbose: bool = False) -> dict:
                     agent_results.append(future.result())
     else:
         active_agents = plan.get("agents") or ["Price", "Fundamentals", "Sentiment"]
+        def _run_agent(name):
+            task = plan["task_per_agent"].get(name, question)
+            if name == "Price":
+                direct = _try_direct_tool_call(task)
+                if direct is not None:
+                    return direct
+            return SPECIALIST_RUNNERS[name](task, verbose)
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(active_agents))) as ex:
-            futures = {
-                ex.submit(
-                    SPECIALIST_RUNNERS[name],
-                    plan["task_per_agent"].get(name, question),
-                    verbose,
-                ): name for name in active_agents
-            }
+            futures = {ex.submit(_run_agent, name): name for name in active_agents}
             for future in concurrent.futures.as_completed(futures):
                 agent_results.append(future.result())
 
