@@ -28,20 +28,28 @@ _info_cache: dict = {}  # ticker -> (fetched_at: float, data: dict | None)
 
 def _get_info(ticker):
     """yfinance .info with TTL caching. Failed/None results are NOT cached
-    so they are retried on the next call."""
+    so they are retried on the next call. Retries 3× with 1 s delay to
+    handle transient Yahoo Finance rate-limit rejections on cloud IPs."""
     entry = _info_cache.get(ticker)
     if entry is not None:
         fetched_at, data = entry
         if time.time() - fetched_at < _INFO_CACHE_TTL:
             return data
-    try:
-        data = yf.Ticker(ticker).info
-        if data and data.get("shortName"):  # only cache valid responses
-            _info_cache[ticker] = (time.time(), data)
-            return data
-    except Exception:
-        pass
-    return None  # not cached — will be retried next call
+
+    t = yf.Ticker(ticker)
+    for attempt in range(3):
+        try:
+            # yfinance 1.x exposes get_info() as well as the .info property
+            data = t.get_info() if hasattr(t, "get_info") else t.info
+            if data and data.get("shortName"):
+                _info_cache[ticker] = (time.time(), data)
+                return data
+        except Exception:
+            pass
+        if attempt < 2:
+            time.sleep(1)
+
+    return None  # not cached — will be retried on next call
 
 
 def _is_market_open(tz_name, open_h, open_m, close_h, close_m):
