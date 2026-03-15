@@ -200,11 +200,72 @@ def get_tickers_by_sector(sector: str) -> dict:
     return {"stocks": df.to_dict(orient="records")}
 
 
-# ── Dispatch map ──────────────────────────────────────────────
+def rank_stocks_by_metric(
+    sector: str,
+    metric: str = "pe_ratio",
+    top_n: int = 5,
+    descending: bool = True,
+    market_cap: str = "Large",
+) -> dict:
+    """Fetch Large-cap tickers for a sector, get their overview, sort by metric,
+    and return the top-N ranked list. Sorting is done in Python — not by the LLM.
+
+    metric: one of 'pe_ratio', 'eps', 'market_cap' (MarketCapitalization), 'week_high_52'.
+    """
+    # 1. Get candidate tickers from DB
+    conn = sqlite3.connect(DB_PATH)
+    df = pd.read_sql_query(
+        "SELECT ticker FROM stocks "
+        "WHERE LOWER(sector) LIKE ('%' || LOWER(?) || '%') "
+        "  AND market_cap = ? ORDER BY ticker LIMIT 20",
+        conn, params=[sector, market_cap])
+    conn.close()
+
+    if df.empty:
+        return {"error": f"No {market_cap}-cap stocks found for sector '{sector}'"}
+
+    tickers = df["ticker"].tolist()
+
+    # 2. Fetch overview for each ticker (skip delisted)
+    rows = []
+    for t in tickers[:15]:
+        ov = get_company_overview(t)
+        if "error" in ov:
+            continue
+        # Parse the requested metric to float for sorting
+        raw = ov.get(metric, "None")
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            continue  # metric is None / N/A — skip
+        rows.append({**ov, "_sort_val": val})
+
+    if not rows:
+        return {"error": f"No valid '{metric}' data found for {market_cap}-cap stocks in '{sector}'"}
+
+    # 3. Sort in Python — deterministic, no LLM involvement
+    rows.sort(key=lambda r: r["_sort_val"], reverse=descending)
+    ranked = []
+    for rank, r in enumerate(rows[:top_n], start=1):
+        ranked.append({
+            "rank"        : rank,
+            "ticker"      : r["ticker"],
+            "name"        : r.get("name", ""),
+            "pe_ratio"    : r.get("pe_ratio", "N/A"),
+            "eps"         : r.get("eps", "N/A"),
+            "market_cap"  : r.get("market_cap", "N/A"),
+            "week_high_52": r.get("week_high_52", "N/A"),
+            "week_low_52" : r.get("week_low_52", "N/A"),
+        })
+
+    return {"ranked": ranked, "metric": metric, "sector": sector, "descending": descending}
+
+
 ALL_TOOL_FUNCTIONS = {
     "get_tickers_by_sector" : get_tickers_by_sector,
     "get_price_performance" : get_price_performance,
     "get_company_overview"  : get_company_overview,
+    "rank_stocks_by_metric" : rank_stocks_by_metric,
     "get_market_status"     : get_market_status,
     "get_top_gainers_losers": get_top_gainers_losers,
     "get_news_sentiment"    : get_news_sentiment,
@@ -326,7 +387,18 @@ SCHEMA_SQL      = _s("query_local_db",
     "Run a SQL SELECT on stocks.db. Table 'stocks': ticker, company, sector, industry, market_cap (Large/Mid/Small), exchange.",
     {"sql": {"type": "string", "description": "A valid SQL SELECT statement"}}, ["sql"])
 
-ALL_SCHEMAS = [SCHEMA_TICKERS, SCHEMA_PRICE, SCHEMA_OVERVIEW,
+SCHEMA_RANK     = _s("rank_stocks_by_metric",
+    "Fetch Large-cap stocks for a sector, retrieve their fundamentals, sort by a metric in Python, and return the top-N ranked list. "
+    "Use this for any 'top N by P/E / EPS / market cap' sector question. Sorting is guaranteed correct.",
+    {
+        "sector"     : {"type": "string", "description": "Sector name, e.g. 'technology'"},
+        "metric"     : {"type": "string", "enum": ["pe_ratio", "eps", "market_cap", "week_high_52"], "description": "Field to rank by"},
+        "top_n"      : {"type": "integer", "default": 5, "description": "How many stocks to return"},
+        "descending" : {"type": "boolean", "default": True, "description": "True = highest first"},
+        "market_cap" : {"type": "string", "enum": ["Large", "Mid", "Small"], "default": "Large"},
+    }, ["sector", "metric"])
+
+ALL_SCHEMAS = [SCHEMA_TICKERS, SCHEMA_PRICE, SCHEMA_OVERVIEW, SCHEMA_RANK,
                SCHEMA_STATUS, SCHEMA_MOVERS, SCHEMA_NEWS, SCHEMA_SQL]
 
 
@@ -369,13 +441,9 @@ AVAILABLE TOOLS AND WHEN TO USE THEM:
 
 CRITICAL RULES:
 - For sector/industry RANKING questions ("top N stocks by P/E", "best by market cap", etc.):
-  1. query_local_db: SELECT ticker FROM stocks WHERE LOWER(sector) LIKE '%technology%' AND market_cap='Large' ORDER BY ticker LIMIT 20
-     (Adjust sector name. Use market_cap='Large' to keep the call count small. LIMIT 20 ensures enough survivors after delisted tickers are filtered out.)
-  2. get_company_overview for each ticker returned (at most 15).
-  3. Filter out tickers where the metric is "None".
-  4. Sort remaining tickers by the requested metric (e.g. P/E descending for "highest P/E"). The SQL ORDER BY ticker is alphabetical — you MUST re-sort by the metric value after fetching.
-  5. Report the top-N from the sorted list.
-  DO NOT use get_tickers_by_sector for ranking — it returns 60+ tickers and is much slower.
+  Call rank_stocks_by_metric(sector=..., metric=..., top_n=N, descending=True).
+  This tool handles SQL lookup + data fetching + sorting in Python — the result is already correctly ordered. Report it as-is.
+  DO NOT use get_tickers_by_sector or query_local_db for ranking — use rank_stocks_by_metric.
 - For other sector/industry questions (non-ranking): use get_tickers_by_sector or query_local_db to get tickers, THEN fetch data. Never guess tickers.
 - For comparison questions: Fetch data for ALL tickers mentioned, then compare.
 - For multi-condition questions (e.g., "dropped this month but grew this year"): Fetch data for BOTH time periods, then filter and compare.
@@ -409,7 +477,7 @@ def run_single_agent(question: str, verbose: bool = False) -> AgentResult:
 # ═══════════════════════════════════════════════════════════════
 
 MARKET_TOOLS      = [SCHEMA_TICKERS, SCHEMA_PRICE, SCHEMA_STATUS, SCHEMA_MOVERS]
-FUNDAMENTAL_TOOLS = [SCHEMA_OVERVIEW, SCHEMA_SQL, SCHEMA_TICKERS]
+FUNDAMENTAL_TOOLS = [SCHEMA_OVERVIEW, SCHEMA_RANK, SCHEMA_SQL, SCHEMA_TICKERS]
 SENTIMENT_TOOLS   = [SCHEMA_NEWS, SCHEMA_SQL]
 
 ORCHESTRATOR_PROMPT = """You are a query router for a financial multi-agent system.
@@ -475,14 +543,12 @@ FUNDAMENTALS_AGENT_PROMPT = """You are a fundamental analysis specialist with ac
 Answer accurately using only the data your tools return. If a tool fails, say so.
 Present all values clearly with the field name (e.g. "P/E ratio: 28.5").
 
-SECTOR RANKING PROTOCOL — follow these steps EXACTLY when asked to rank/find top stocks in a sector by P/E:
-1. Call query_local_db with: SELECT ticker FROM stocks WHERE LOWER(sector) LIKE '%technology%' AND market_cap='Large' ORDER BY ticker LIMIT 20
-   (Adjust the sector name to match the question. Use market_cap='Large' to limit calls. LIMIT 20 ensures enough survivors after delisted tickers are filtered out.)
-2. Call get_company_overview for each ticker in the result (at most 15 tickers).
-3. Filter out any tickers where PERatio is "None" or missing.
-4. Sort the remaining tickers by PERatio (ascending = cheapest, descending = most expensive) and report the top-N requested.
+SECTOR RANKING PROTOCOL — follow these steps EXACTLY when asked to rank/find top stocks in a sector by P/E or any other metric:
+1. Call rank_stocks_by_metric(sector=..., metric="pe_ratio", top_n=5, descending=True).
+   This handles SQL lookup + data fetching + Python sort internally. The result is already correctly sorted.
+2. Report the ranked list from the result directly.
 
-IMPORTANT: When no tickers are listed in your task, always use query_local_db with a Large market_cap filter first before calling get_company_overview."""
+IMPORTANT: Use rank_stocks_by_metric for ALL sector ranking questions. Do NOT call query_local_db + get_company_overview manually for ranking."""
 
 SENTIMENT_AGENT_PROMPT = """You are a news and sentiment specialist with access to real-time news headlines and sentiment scores for individual stocks.
 Summarise sentiment clearly: Bullish / Bearish / Neutral with score.
