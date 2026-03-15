@@ -708,7 +708,9 @@ OUTPUT RULES:
    - Include ALL key numeric values from the specialist answers.
    - For SENTIMENT: list EVERY headline with its exact label and score.
    - For SINGLE-TICKER PRICE: report start, end, AND % change.
-   - For 52-WEEK RANGE FILTER: for each qualifying stock report TICKER (Company Name): current $X.XX | 52-week $LOW - $HIGH | X.XX% above low | Sentiment: Label (score), Label (score), ... Always include the company name in parentheses after the ticker — it is present in the specialist answer.
+   - For 52-WEEK RANGE FILTER: output EXACTLY ONE LINE per stock, then a blank line before the next stock. Format per stock:
+     TICKER (Company Name): current $X.XX | 52-week $LOW - $HIGH | X.XX% above low | Sentiment: Label (score), Label (score), ...
+     Always include the company name in parentheses — it is present in the specialist answer. Every stock MUST start on its own new line. No two stocks on the same line.
    - For MULTI-CONDITION FILTER: list every qualifying stock with BOTH 1-month % AND YTD %.
    - Draw facts from specialist_answers only.
    - No markdown, no bullet points, no headers.
