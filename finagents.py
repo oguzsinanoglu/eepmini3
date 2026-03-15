@@ -405,7 +405,11 @@ Specialists available:
 - "Sentiment"    — handles news headlines and Bullish/Bearish/Neutral sentiment scores
 
 RULES:
-1. Only activate specialists that are strictly needed to answer the question.
+1. Only activate specialists that are STRICTLY needed to answer the question.
+   - Questions about P/E, EPS, market cap, or 52-week range → "Fundamentals" ONLY. Do NOT add Price or Sentiment.
+   - Questions about price change / performance → "Price" ONLY (unless also asking for fundamentals).
+   - Questions about news or sentiment → "Sentiment" ONLY (unless also asking for price or fundamentals).
+   - Only combine multiple specialists when the question explicitly asks for multiple domains in one answer.
 2. Detect a cross-domain ranking dependency: if the question first ranks by price/return and then asks for fundamentals or sentiment of the top results (a DIFFERENT domain), set "phased": true and name the Phase 1 agent as "phase1_agent": "Price".
 3. Write a concise, self-contained sub-task string for each activated specialist. The sub-task must include any ticker symbols mentioned in the original question.
 4. Return ONLY valid JSON — no prose before or after.
@@ -414,11 +418,10 @@ RULES:
 
 Return format:
 {
-  "agents": ["Price", "Fundamentals"],
+  "agents": ["Fundamentals"],
   "phased": false,
   "phase1_agent": "",
   "task_per_agent": {
-    "Price":        "...",
     "Fundamentals": "..."
   }
 }"""
@@ -457,9 +460,9 @@ Answer accurately using only the data your tools return. If a tool fails, say so
 Present all values clearly with the field name (e.g. "P/E ratio: 28.5").
 
 SECTOR RANKING PROTOCOL — follow these steps EXACTLY when asked to rank/find top stocks in a sector by P/E:
-1. Call query_local_db with: SELECT ticker FROM stocks WHERE LOWER(sector) LIKE '%technology%' AND market_cap='Large' ORDER BY ticker LIMIT 10
-   (Adjust the sector name to match the question. Use market_cap='Large' to limit calls.)
-2. Call get_company_overview for each ticker in the result (at most 8 tickers).
+1. Call query_local_db with: SELECT ticker FROM stocks WHERE LOWER(sector) LIKE '%technology%' AND market_cap='Large' ORDER BY ticker LIMIT 20
+   (Adjust the sector name to match the question. Use market_cap='Large' to limit calls. LIMIT 20 ensures enough survivors after delisted tickers are filtered out.)
+2. Call get_company_overview for each ticker in the result (at most 15 tickers).
 3. Filter out any tickers where PERatio is "None" or missing.
 4. Sort the remaining tickers by PERatio (ascending = cheapest, descending = most expensive) and report the top-N requested.
 
