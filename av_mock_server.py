@@ -34,9 +34,17 @@ _YF_HEADERS = {
 }
 
 def _yf_ticker(symbol: str) -> yf.Ticker:
-    """Return a yfinance Ticker with a custom session that uses a browser UA."""
-    session = _req_module.Session()
-    session.headers.update(_YF_HEADERS)
+    """Return a yfinance Ticker using curl_cffi Chrome impersonation.
+    curl_cffi replicates Chrome's TLS fingerprint (JA3), which defeats
+    Yahoo Finance's datacenter-IP blocking that a plain requests.Session
+    cannot bypass even with a browser User-Agent header.
+    Falls back to a plain requests.Session if curl_cffi is unavailable."""
+    try:
+        from curl_cffi import requests as _curl_requests
+        session = _curl_requests.Session(impersonate="chrome120")
+    except ImportError:
+        session = _req_module.Session()
+        session.headers.update(_YF_HEADERS)
     return yf.Ticker(symbol, session=session)
 
 app = Flask(__name__)
