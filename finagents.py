@@ -336,16 +336,87 @@ def filter_sector_by_52week(sector: str, market_cap: str = "Large", max_results:
     return {"qualifying": qualifying[:max_results], "sector": sector, "count": len(qualifying)}
 
 
+def filter_sector_by_return_conditions(
+    sector: str,
+    period1: str = "1mo",
+    condition1: str = "negative",
+    period2: str = "ytd",
+    condition2: str = "positive",
+    sort_by: str = "period2",
+    top_n: int = 3,
+    market_cap: str = "Large",
+) -> dict:
+    """Fetch ALL tickers for a sector, download period1 and period2 returns for
+    every ticker, filter in Python by condition1/condition2, sort, and return top_n.
+    Filtering is deterministic — no LLM arithmetic.
+
+    condition values: 'positive' (>0) or 'negative' (<0)
+    sort_by values: 'period1' or 'period2'
+    """
+    sector = _normalize_sector(sector)
+    conn = sqlite3.connect(DB_PATH)
+    if market_cap:
+        df = pd.read_sql_query(
+            "SELECT ticker FROM stocks "
+            "WHERE LOWER(sector) LIKE ('%' || LOWER(?) || '%') "
+            "  AND market_cap = ? ORDER BY ticker LIMIT 60",
+            conn, params=[sector, market_cap])
+    else:
+        df = pd.read_sql_query(
+            "SELECT ticker FROM stocks "
+            "WHERE LOWER(sector) LIKE ('%' || LOWER(?) || '%') "
+            "ORDER BY ticker LIMIT 60",
+            conn, params=[sector])
+    conn.close()
+
+    if df.empty:
+        return {"error": f"No stocks found for sector '{sector}'"}
+
+    tickers = df["ticker"].tolist()
+
+    r1 = get_price_performance(tickers, period=period1)
+    r2 = get_price_performance(tickers, period=period2)
+
+    def _pct(result, t):
+        v = result.get(t, {})
+        if isinstance(v, dict) and "pct_change" in v:
+            return float(v["pct_change"])
+        return None
+
+    def _passes(val, cond):
+        if val is None:
+            return False
+        return val < 0 if cond == "negative" else val > 0
+
+    rows = []
+    for t in tickers:
+        p1 = _pct(r1, t)
+        p2 = _pct(r2, t)
+        if _passes(p1, condition1) and _passes(p2, condition2):
+            rows.append({"ticker": t, period1: round(p1, 2), period2: round(p2, 2)})
+
+    sort_field = period1 if sort_by == "period1" else period2
+    rows.sort(key=lambda r: r[sort_field], reverse=(condition2 == "positive"))
+
+    return {
+        "results": rows[:top_n],
+        "total_qualifying": len(rows),
+        "sector": sector,
+        "filter": f"{period1} {condition1} AND {period2} {condition2}",
+    }
+
+
 ALL_TOOL_FUNCTIONS = {
-    "get_tickers_by_sector"    : get_tickers_by_sector,
-    "get_price_performance"    : get_price_performance,
-    "get_company_overview"     : get_company_overview,
-    "rank_stocks_by_metric"    : rank_stocks_by_metric,
-    "filter_sector_by_52week"  : filter_sector_by_52week,
-    "get_market_status"        : get_market_status,
-    "get_top_gainers_losers"   : get_top_gainers_losers,
-    "get_news_sentiment"       : get_news_sentiment,
-    "query_local_db"           : query_local_db,
+    "get_tickers_by_sector"             : get_tickers_by_sector,
+    "get_price_performance"             : get_price_performance,
+    "get_company_overview"              : get_company_overview,
+    "rank_stocks_by_metric"             : rank_stocks_by_metric,
+    "filter_sector_by_52week"           : filter_sector_by_52week,
+    "filter_sector_by_return_conditions": filter_sector_by_return_conditions,
+    "get_market_status"                 : get_market_status,
+    "get_top_gainers_losers"            : get_top_gainers_losers,
+    "get_news_sentiment"                : get_news_sentiment,
+    "query_local_db"                    : query_local_db,
 }
 
 
@@ -484,8 +555,24 @@ SCHEMA_52WEEK   = _s("filter_sector_by_52week",
         "max_results": {"type": "integer", "default": 8, "description": "Max stocks to return (default 8)"},
     }, ["sector"])
 
+SCHEMA_RETURN_FILTER = _s("filter_sector_by_return_conditions",
+    "Fetch ALL tickers for a sector, download returns for two periods, filter by sign conditions "
+    "in Python, sort, and return top-N. Use this for any question like 'which stocks dropped this "
+    "month but grew this year' or similar two-period filter. Filtering is deterministic and covers "
+    "all tickers in the sector.",
+    {
+        "sector"    : {"type": "string", "description": "Sector name, e.g. 'technology'"},
+        "period1"   : {"type": "string", "default": "1mo", "description": "First period: '1mo','3mo','6mo','ytd','1y'"},
+        "condition1": {"type": "string", "enum": ["negative", "positive"], "default": "negative", "description": "Sign condition for period1"},
+        "period2"   : {"type": "string", "default": "ytd", "description": "Second period: '1mo','3mo','6mo','ytd','1y'"},
+        "condition2": {"type": "string", "enum": ["negative", "positive"], "default": "positive", "description": "Sign condition for period2"},
+        "sort_by"   : {"type": "string", "enum": ["period1", "period2"], "default": "period2", "description": "Which period to sort by"},
+        "top_n"     : {"type": "integer", "default": 3, "description": "How many results to return"},
+        "market_cap": {"type": "string", "enum": ["Large", "Mid", "Small", ""], "default": "Large"},
+    }, ["sector"])
+
 ALL_SCHEMAS = [SCHEMA_TICKERS, SCHEMA_PRICE, SCHEMA_OVERVIEW, SCHEMA_RANK, SCHEMA_52WEEK,
-               SCHEMA_STATUS, SCHEMA_MOVERS, SCHEMA_NEWS, SCHEMA_SQL]
+               SCHEMA_RETURN_FILTER, SCHEMA_STATUS, SCHEMA_MOVERS, SCHEMA_NEWS, SCHEMA_SQL]
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -566,7 +653,7 @@ def run_single_agent(question: str, verbose: bool = False) -> AgentResult:
 # Multi-Agent System
 # ═══════════════════════════════════════════════════════════════
 
-MARKET_TOOLS      = [SCHEMA_TICKERS, SCHEMA_PRICE, SCHEMA_STATUS, SCHEMA_MOVERS]
+MARKET_TOOLS      = [SCHEMA_TICKERS, SCHEMA_PRICE, SCHEMA_RETURN_FILTER, SCHEMA_STATUS, SCHEMA_MOVERS]
 FUNDAMENTAL_TOOLS = [SCHEMA_OVERVIEW, SCHEMA_RANK, SCHEMA_52WEEK, SCHEMA_SQL, SCHEMA_TICKERS]
 SENTIMENT_TOOLS   = [SCHEMA_NEWS, SCHEMA_52WEEK, SCHEMA_SQL]
 
@@ -592,7 +679,7 @@ RULES:
    - Include the EXACT sector name from the original question verbatim (e.g. if the question says "finance sector", the sub-task must say "finance sector", not "financial sector", not "Financial Services", not any other substitution). The specialist agent resolves the canonical name itself.
 4. Return ONLY valid JSON — no prose before or after.
 5. Always activate at least one specialist — never return an empty "agents" list. If the question is purely about DB/sector lookup (e.g., "list companies in database"), activate "Price" (it has get_tickers_by_sector).
-6. For questions requiring TWO time-period conditions on the SAME stocks (e.g., "dropped this month but grew this year", "fell recently but up this year", "which stocks went up/down over two periods"): this is ALWAYS a Price question. Set "phased": false, assign ONLY "Price". DO NOT route to Fundamentals even if the question says "top N" — the top-N here ranks by price return, not by P/E or market cap. Sub-task template: "Fetch 1mo AND ytd performance for [sector] tickers. You MUST call get_price_performance twice: once for period=1mo and once for period=ytd. Filter: 1mo<0 AND ytd>0. Return top 3 by ytd. Report both 1mo% and ytd% for each result."
+6. For questions requiring TWO time-period conditions on the SAME stocks (e.g., "dropped this month but grew this year", "fell recently but up this year"): this is ALWAYS a Price question. Set "phased": false, assign ONLY "Price". Sub-task template: "Call filter_sector_by_return_conditions(sector='[sector]', period1='1mo', condition1='negative', period2='ytd', condition2='positive', top_n=3). Report the results directly."
 
 Return format:
 {
@@ -625,20 +712,10 @@ A) COMPARISON (multiple specific tickers): Report ALL requested tickers: TICKER:
 B) SINGLE TICKER: TICKER: start=$X.XX  end=$X.XX  change=+Y.YY%
 C) SECTOR RANKING (top-N): List top-N from sorted scratchpad: 1. TICKER: +X.XX%
 
-MULTI-CONDITION FILTERING PROTOCOL — MANDATORY for questions with two time-period conditions (e.g., "dropped this month but grew this year"):
-1. Call get_tickers_by_sector to get the ticker list if not provided.
-2. Call get_price_performance ONCE for period=1mo with ALL tickers.
-3. Call get_price_performance ONCE for period=ytd with ALL tickers.
-   YOU MUST MAKE BOTH CALLS BEFORE ANSWERING. Do not skip step 3.
-4. Build a dual scratchpad: for each ticker write down its exact 1mo% AND ytd% side by side.
-5. Apply filters mechanically — check each ticker individually:
-   - "dropped this month" = 1mo% < 0 (negative number)
-   - "grew this year" = ytd% > 0 (positive number)
-   A ticker passes if AND ONLY IF BOTH values satisfy their respective condition.
-   IMPORTANT: -7.53% IS negative (passes "dropped"); +14.13% IS positive (passes "grew"). Do arithmetic checks, not pattern matching.
-6. Sort passing tickers by ytd% descending. Select top-N.
-7. Report BOTH values for every qualifying stock.
-8. Only say "no stocks satisfied both conditions" if your scratchpad shows zero tickers passing step 5. If ANY ticker passes, report it — never contradict your own data.
+MULTI-CONDITION FILTERING PROTOCOL — for two-period filter questions (e.g., "dropped this month but grew this year"):
+1. Call filter_sector_by_return_conditions(sector=..., period1=..., condition1=..., period2=..., condition2=..., top_n=N).
+   This tool fetches ALL sector tickers, downloads both periods, filters and sorts in Python — the result is already correct.
+2. Report the results directly. Do NOT call get_tickers_by_sector or get_price_performance manually for this type of question.
 
 Always report the exact numeric pct_change for every stock you mention."""
 
@@ -721,7 +798,7 @@ OUTPUT RULES:
    - For 52-WEEK RANGE FILTER: output EXACTLY ONE LINE per stock, then a blank line before the next stock. Format per stock:
      TICKER (Company Name): current $X.XX | 52-week $LOW - $HIGH | X.XX% above low | Sentiment: Label (score), Label (score), ...
      Always include the company name in parentheses — it is present in the specialist answer. Every stock MUST start on its own new line. No two stocks on the same line.
-   - For MULTI-CONDITION PRICE FILTER ("dropped this month but grew this year", "top N by return", etc.): list every qualifying stock with rank, 1-month %, and YTD %. FORMAT per stock: N. TICKER: 1mo X.XX% | YTD X.XX%. No company names needed.
+   - For MULTI-CONDITION PRICE FILTER ("dropped this month but grew this year", "top N by return", etc.): list every qualifying stock with both period values. FORMAT per stock: N. TICKER: 1mo X.XX% | YTD X.XX%. No company names needed. If the answer says no stocks qualified, relay that verbatim.
    - Draw facts from specialist_answers only.
    - No markdown, no bullet points, no headers.
    - Use numerical values exactly as provided.
