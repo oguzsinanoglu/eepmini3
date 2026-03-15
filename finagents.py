@@ -817,15 +817,18 @@ RULES:
    - Questions about news or sentiment (with specific tickers) → "Sentiment" ONLY.
    - Only combine multiple specialists when the question explicitly asks for multiple domains in one answer.
 2. Detect a cross-domain dependency and use phased execution:
-   a) Price-then-fundamentals/sentiment: question ranks/filters by price/return then asks fundamentals or sentiment of top results → set "phased": true, "phase1_agent": "Price". Examples: "top 3 semiconductor stocks by 1-year return, what are their P/E ratios", "best energy stocks this year, show their news sentiment". Sub-task for Price MUST say exactly: "Call rank_sector_by_return(sector='[sector_from_question]', period='[period]', top_n=[N]). Report the tickers and returns from the results list directly."
+   a) Price-then-fundamentals/sentiment: question ranks/filters by price/return then asks fundamentals or sentiment of top results → set "phased": true, "phase1_agent": "Price". Examples: "top 3 semiconductor stocks by 1-year return, what are their P/E ratios", "best energy stocks this year, show their news sentiment".
+      Price sub-task MUST contain the literal function call with the actual values substituted, like this:
+      "Call rank_sector_by_return(sector='semiconductor', period='1y', top_n=3). Report the tickers and returns from the results list directly."
+      Replace 'semiconductor' with the actual sector/industry from the question, '1y' with the actual period (1mo/3mo/6mo/ytd/1y), and 3 with the actual N. Do NOT use bracket placeholders.
    b) 52-week-then-sentiment: question asks which SECTOR stocks are closer to 52-week low AND also requests news sentiment → set "phased": true, "phase1_agent": "Fundamentals", agents: ["Fundamentals", "Sentiment"]. The Fundamentals agent identifies qualifying stocks; Sentiment receives those tickers as a hint.
 3. Write a concise, self-contained sub-task string for each activated specialist. The sub-task must:
    - Include any ticker symbols mentioned in the original question.
    - Include the EXACT sector name from the original question verbatim (e.g. if the question says "finance sector", the sub-task must say "finance sector", not "financial sector", not "Financial Services", not any other substitution). The specialist agent resolves the canonical name itself.
 4. Return ONLY valid JSON — no prose before or after.
 5. Always activate at least one specialist — never return an empty "agents" list. If the question is purely about DB/sector lookup (e.g., "list companies in database"), activate "Price" (it has get_tickers_by_sector).
-6. For questions requiring TWO time-period conditions on the SAME stocks (e.g., "dropped this month but grew this year", "fell recently but up this year"): this is ALWAYS a Price question. Set "phased": false, assign ONLY "Price". Sub-task template: "Call filter_sector_by_return_conditions(sector='[sector]', period1='1mo', condition1='negative', period2='ytd', condition2='positive', top_n=3). Report the results directly."
-7. For questions asking which stocks in a sector have grown/gained/risen/increased by MORE THAN or AT LEAST a specific percentage over ONE period (e.g. "grown more than 20% this year", "up at least 15% this month", "gained over 30% YTD"): this is ALWAYS a Price question — NOT a Fundamentals question even if the question mentions large-cap or NASDAQ. Set "phased": false, assign ONLY "Price". Sub-task template: "Call filter_sector_by_min_return(sector='[sector]', period='[ytd/1mo/etc]', min_pct=[threshold], top_n=[N]). Report the results directly."
+6. For questions requiring TWO time-period conditions on the SAME stocks (e.g., "dropped this month but grew this year", "fell recently but up this year"): this is ALWAYS a Price question. Set "phased": false, assign ONLY "Price". Sub-task MUST contain the literal function call: "Call filter_sector_by_return_conditions(sector='technology', period1='1mo', condition1='negative', period2='ytd', condition2='positive', top_n=3). Report the results directly." — replace 'technology' with the actual sector, and adjust periods/conditions to match the question.
+7. For questions asking which stocks in a sector have grown/gained/risen/increased by MORE THAN or AT LEAST a specific percentage over ONE period (e.g. "grown more than 20% this year", "up at least 15% this month", "gained over 30% YTD"): this is ALWAYS a Price question — NOT a Fundamentals question even if the question mentions large-cap or NASDAQ. Set "phased": false, assign ONLY "Price". Sub-task MUST contain the literal function call: "Call filter_sector_by_min_return(sector='technology', period='ytd', min_pct=20, top_n=5). Report the results directly." — replace 'technology' with the actual sector, 'ytd' with the actual period, 20 with the actual threshold, and 5 with the actual N.
 
 Return format:
 {
@@ -1098,35 +1101,37 @@ def _extract_tickers_from_result(result: AgentResult, top_n: int = 3) -> list:
     return [t[0] for t in tickers[:top_n]]
 
 
-def _try_direct_tool_call(task: str) -> AgentResult | None:
-    """If the orchestrator sub-task explicitly says to call a deterministic Python tool,
-    execute it directly without an LLM agent loop to guarantee consistent results.
+def _try_direct_tool_call(task: str, original_question: str = "") -> "AgentResult | None":
+    """If the orchestrator sub-task (or original question) indicates a deterministic
+    Python tool, execute it directly without an LLM agent loop.
     Handles: rank_sector_by_return, filter_sector_by_return_conditions, filter_sector_by_min_return.
-    Returns a synthetic AgentResult, or None if no matching call is found in the task string.
+    Returns a synthetic AgentResult, or None if no matching call is detected.
     """
     import re
 
     def _parse_kwargs(args_str: str) -> dict:
-        """Parse key=value pairs from a function call argument string."""
+        """Parse key=value pairs; strips bracket artefacts like sector='[semiconductor]'."""
         kwargs = {}
-        for m in re.finditer(r"(\w+)\s*=\s*(?:'([^']*)'|\"([^\"]*)\"|([0-9.]+))", args_str):
+        for m in re.finditer(r"(\w+)\s*=\s*(?:'([^']*)'|\"([^\"]*)\"|([\-0-9.]+))", args_str):
             k = m.group(1)
-            v = m.group(2) or m.group(3) or m.group(4)
-            if k in ("top_n",):
-                kwargs[k] = int(float(v))
-            elif k in ("min_pct",):
-                kwargs[k] = float(v)
+            v = (m.group(2) or m.group(3) or m.group(4) or "").strip("[]")
+            if k == "top_n":
+                try: kwargs[k] = int(float(v))
+                except ValueError: pass
+            elif k == "min_pct":
+                try: kwargs[k] = float(v)
+                except ValueError: pass
             else:
                 kwargs[k] = v
         return kwargs
 
-    def _make_result(fn_name: str, result: dict) -> AgentResult:
+    def _make_result(fn_name: str, result: dict) -> "AgentResult":
         rows = result.get("results", result.get("qualifying", []))
         lines = []
         for row in rows:
-            ticker = row.get("ticker", "")
-            name   = row.get("name", "")
-            vals   = {k: v for k, v in row.items() if k not in ("ticker", "name")}
+            ticker  = row.get("ticker", "")
+            name    = row.get("name", "")
+            vals    = {k: v for k, v in row.items() if k not in ("ticker", "name")}
             val_str = " | ".join(f"{k} {v}" for k, v in vals.items())
             lines.append(f"{ticker} ({name}): {val_str}" if name else f"{ticker}: {val_str}")
         answer = "\n".join(lines) if lines else "No results found."
@@ -1137,26 +1142,54 @@ def _try_direct_tool_call(task: str) -> AgentResult | None:
             raw_data={f"{fn_name}_1": result},
         )
 
-    # rank_sector_by_return(...)
-    m = re.search(r"rank_sector_by_return\((.*?)\)", task, re.IGNORECASE | re.DOTALL)
-    if m:
-        kwargs = _parse_kwargs(m.group(1))
-        if "sector" in kwargs:
-            return _make_result("rank_sector_by_return", rank_sector_by_return(**kwargs))
+    def _detect_period(text: str) -> str:
+        t = text.lower()
+        if re.search(r"1[\s\-]?y(?:ear)?", t) or "1y" in t:  return "1y"
+        if "ytd" in t or "year to date" in t or "this year" in t:  return "ytd"
+        if re.search(r"1[\s\-]?mo(?:nth)?", t) or "this month" in t: return "1mo"
+        if re.search(r"3[\s\-]?mo(?:nth)?s?", t): return "3mo"
+        if re.search(r"6[\s\-]?mo(?:nth)?s?", t): return "6mo"
+        return "1y"
 
-    # filter_sector_by_return_conditions(...)
-    m = re.search(r"filter_sector_by_return_conditions\((.*?)\)", task, re.IGNORECASE | re.DOTALL)
-    if m:
-        kwargs = _parse_kwargs(m.group(1))
-        if "sector" in kwargs:
-            return _make_result("filter_sector_by_return_conditions", filter_sector_by_return_conditions(**kwargs))
+    # ── Explicit function-call patterns (try task first, then original question) ──
+    for text in (task, original_question):
+        if not text:
+            continue
 
-    # filter_sector_by_min_return(...)
-    m = re.search(r"filter_sector_by_min_return\((.*?)\)", task, re.IGNORECASE | re.DOTALL)
-    if m:
-        kwargs = _parse_kwargs(m.group(1))
-        if "sector" in kwargs:
-            return _make_result("filter_sector_by_min_return", filter_sector_by_min_return(**kwargs))
+        m = re.search(r"rank_sector_by_return\((.*?)\)", text, re.IGNORECASE | re.DOTALL)
+        if m:
+            kwargs = _parse_kwargs(m.group(1))
+            if kwargs.get("sector", "").strip():
+                return _make_result("rank_sector_by_return", rank_sector_by_return(**kwargs))
+
+        m = re.search(r"filter_sector_by_return_conditions\((.*?)\)", text, re.IGNORECASE | re.DOTALL)
+        if m:
+            kwargs = _parse_kwargs(m.group(1))
+            if kwargs.get("sector", "").strip():
+                return _make_result("filter_sector_by_return_conditions", filter_sector_by_return_conditions(**kwargs))
+
+        m = re.search(r"filter_sector_by_min_return\((.*?)\)", text, re.IGNORECASE | re.DOTALL)
+        if m:
+            kwargs = _parse_kwargs(m.group(1))
+            if kwargs.get("sector", "").strip():
+                return _make_result("filter_sector_by_min_return", filter_sector_by_min_return(**kwargs))
+
+    # ── Natural-language fallback: "top N <sector> stocks by <period> return" ──
+    for text in (task, original_question):
+        if not text:
+            continue
+        m = re.search(
+            r"top[\s\-]+(\d+)[\s\-]+((?:[\w]+[\s\-]?)+?)\s+stocks?\s+by\s+"
+            r"(?:their\s+|the\s+)?(1[\s\-]?y(?:ear)?|ytd|year[\s\-]to[\s\-]date|"
+            r"1[\s\-]?mo(?:nth)?|3[\s\-]?mo(?:nth)?s?|6[\s\-]?mo(?:nth)?s?)\s+return",
+            text, re.IGNORECASE
+        )
+        if m:
+            top_n  = int(m.group(1))
+            sector = m.group(2).strip().rstrip("-")
+            period = _detect_period(m.group(3))
+            return _make_result("rank_sector_by_return",
+                                rank_sector_by_return(sector=sector, period=period, top_n=top_n))
 
     return None
 
@@ -1182,7 +1215,7 @@ def run_multi_agent(question: str, verbose: bool = False) -> dict:
         p1_task = plan["task_per_agent"].get(p1_name, question)
         # If the sub-task explicitly names a deterministic Python tool, call it
         # directly — do not route through the LLM agent loop to ensure consistency.
-        direct = _try_direct_tool_call(p1_task) if p1_name == "Price" else None
+        direct = _try_direct_tool_call(p1_task, original_question=question) if p1_name == "Price" else None
         p1_result = direct if direct is not None else SPECIALIST_RUNNERS[p1_name](p1_task, verbose=verbose)
         agent_results.append(p1_result)
 
@@ -1215,7 +1248,7 @@ def run_multi_agent(question: str, verbose: bool = False) -> dict:
         def _run_agent(name):
             task = plan["task_per_agent"].get(name, question)
             if name == "Price":
-                direct = _try_direct_tool_call(task)
+                direct = _try_direct_tool_call(task, original_question=question)
                 if direct is not None:
                     return direct
             return SPECIALIST_RUNNERS[name](task, verbose)
