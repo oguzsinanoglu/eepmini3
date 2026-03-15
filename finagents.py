@@ -620,6 +620,14 @@ def run_multi_agent(question: str, verbose: bool = False) -> dict:
     t0 = time.time()
     plan = run_orchestrator(question)
 
+    # Enable rate limiting for the duration of this function so parallel
+    # specialist threads don't burst-hammer Yahoo Finance.
+    try:
+        import av_mock_server as _avms
+        _avms.set_rate_limiting(True)
+    except Exception:
+        _avms = None
+
     agent_results: list[AgentResult] = []
     price_returns: dict = {}
 
@@ -674,6 +682,11 @@ def run_multi_agent(question: str, verbose: bool = False) -> dict:
                                     and 1 <= len(k) <= 5
                                     and isinstance(v, dict) and "pct_change" in v):
                                 price_returns[k] = round(float(v["pct_change"]), 2)
+
+    # All parallel work is done — disable rate limiting immediately so
+    # subsequent single-agent calls are not slowed down.
+    if _avms is not None:
+        _avms.set_rate_limiting(False)
 
     run_critic(question, agent_results, verbose=verbose)
     final_answer = run_synthesizer(question, agent_results, price_returns=price_returns)

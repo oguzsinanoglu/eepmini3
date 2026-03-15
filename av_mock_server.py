@@ -60,6 +60,16 @@ _YF_RATE_LOCK = threading.Lock()
 _LAST_YF_CALL_TIME = 0.0
 _MIN_YF_CALL_GAP   = 0.4  # seconds between calls; keeps bursts under Yahoo's threshold
 
+# Rate limiting is OFF by default (single-agent is sequential and doesn't need it).
+# Enable it before running concurrent multi-agent specialists, then disable again.
+_RATE_LIMIT_ENABLED = False
+
+def set_rate_limiting(enabled: bool) -> None:
+    """Toggle the inter-call rate limiter. Call with True before parallel
+    multi-agent execution and False immediately after."""
+    global _RATE_LIMIT_ENABLED
+    _RATE_LIMIT_ENABLED = enabled
+
 app = Flask(__name__)
 
 _INFO_CACHE_TTL = 300  # seconds; re-fetch after 5 minutes or on failure
@@ -76,12 +86,13 @@ def _get_info(ticker):
         if time.time() - fetched_at < _INFO_CACHE_TTL:
             return data
 
-    # Enforce minimum gap between Yahoo Finance calls (across all threads)
-    with _YF_RATE_LOCK:
-        elapsed = time.time() - _LAST_YF_CALL_TIME
-        if elapsed < _MIN_YF_CALL_GAP:
-            time.sleep(_MIN_YF_CALL_GAP - elapsed)
-        _LAST_YF_CALL_TIME = time.time()
+    # Enforce minimum gap only during concurrent multi-agent execution
+    if _RATE_LIMIT_ENABLED:
+        with _YF_RATE_LOCK:
+            elapsed = time.time() - _LAST_YF_CALL_TIME
+            if elapsed < _MIN_YF_CALL_GAP:
+                time.sleep(_MIN_YF_CALL_GAP - elapsed)
+            _LAST_YF_CALL_TIME = time.time()
 
     t = _yf_ticker(ticker)
     for attempt in range(3):
