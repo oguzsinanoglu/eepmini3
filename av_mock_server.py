@@ -15,11 +15,29 @@ Usage:
 
 from flask import Flask, request, jsonify
 import yfinance as yf
+import requests as _req_module
 import random
 import time
 import traceback
 from datetime import datetime
 from pytz import timezone
+
+# Browser User-Agent — avoids Yahoo Finance rate-limiting datacenter IPs
+_YF_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/122.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+}
+
+def _yf_ticker(symbol: str) -> yf.Ticker:
+    """Return a yfinance Ticker with a custom session that uses a browser UA."""
+    session = _req_module.Session()
+    session.headers.update(_YF_HEADERS)
+    return yf.Ticker(symbol, session=session)
 
 app = Flask(__name__)
 
@@ -27,19 +45,18 @@ _INFO_CACHE_TTL = 300  # seconds; re-fetch after 5 minutes or on failure
 _info_cache: dict = {}  # ticker -> (fetched_at: float, data: dict | None)
 
 def _get_info(ticker):
-    """yfinance .info with TTL caching. Failed/None results are NOT cached
-    so they are retried on the next call. Retries 3× with 1 s delay to
-    handle transient Yahoo Finance rate-limit rejections on cloud IPs."""
+    """yfinance .info with TTL caching and browser User-Agent session.
+    Failed/None results are NOT cached so they are retried on the next call.
+    Retries 3× with 1 s delay to handle transient rate-limit rejections."""
     entry = _info_cache.get(ticker)
     if entry is not None:
         fetched_at, data = entry
         if time.time() - fetched_at < _INFO_CACHE_TTL:
             return data
 
-    t = yf.Ticker(ticker)
+    t = _yf_ticker(ticker)
     for attempt in range(3):
         try:
-            # yfinance 1.x exposes get_info() as well as the .info property
             data = t.get_info() if hasattr(t, "get_info") else t.info
             if data and data.get("shortName"):
                 _info_cache[ticker] = (time.time(), data)
@@ -90,7 +107,7 @@ def _handle_overview(params):
 
     # Fallback: fast_info hits a lighter Yahoo endpoint, less rate-limited
     try:
-        fi = yf.Ticker(ticker).fast_info
+        fi = _yf_ticker(ticker).fast_info
         return {
             "Symbol": ticker,
             "Name": ticker,
@@ -228,7 +245,7 @@ def _handle_news_sentiment(params):
     articles = []
 
     try:
-        news = yf.Ticker(ticker).news
+        news = _yf_ticker(ticker).news
         if news:
             for item in news[:limit]:
                 content = item.get("content", {})
