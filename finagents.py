@@ -372,7 +372,9 @@ CRITICAL RULES:
   1. query_local_db: SELECT ticker FROM stocks WHERE LOWER(sector) LIKE '%technology%' AND market_cap='Large' ORDER BY ticker LIMIT 20
      (Adjust sector name. Use market_cap='Large' to keep the call count small. LIMIT 20 ensures enough survivors after delisted tickers are filtered out.)
   2. get_company_overview for each ticker returned (at most 15).
-  3. Filter out tickers where the metric is "None", sort, and report top-N.
+  3. Filter out tickers where the metric is "None".
+  4. Sort remaining tickers by the requested metric (e.g. P/E descending for "highest P/E"). The SQL ORDER BY ticker is alphabetical — you MUST re-sort by the metric value after fetching.
+  5. Report the top-N from the sorted list.
   DO NOT use get_tickers_by_sector for ranking — it returns 60+ tickers and is much slower.
 - For other sector/industry questions (non-ranking): use get_tickers_by_sector or query_local_db to get tickers, THEN fetch data. Never guess tickers.
 - For comparison questions: Fetch data for ALL tickers mentioned, then compare.
