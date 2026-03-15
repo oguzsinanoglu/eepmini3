@@ -70,6 +70,50 @@ def _patch_mock_av_requests():
 
 _patch_mock_av_requests()
 
+# ── Seed stocks.db from CSV (same logic as create_local_database in notebook) ─
+@st.cache_resource
+def _seed_stocks_db():
+    import sqlite3
+    import pandas as pd
+    from pathlib import Path
+
+    db_path  = str(Path(__file__).parent / "stocks.db")
+    csv_path = str(Path(__file__).parent / "sp500_companies.csv")
+
+    if not Path(csv_path).exists():
+        return False
+
+    def cap_bucket(v):
+        try:
+            v = float(v)
+            return "Large" if v >= 10_000_000_000 else "Mid" if v >= 2_000_000_000 else "Small"
+        except Exception:
+            return "Unknown"
+
+    df = pd.read_csv(csv_path)
+    df.columns = df.columns.str.strip().str.lower()
+    df = df.rename(columns={
+        "symbol":    "ticker",
+        "shortname": "company",
+        "sector":    "sector",
+        "industry":  "industry",
+        "exchange":  "exchange",
+        "marketcap": "market_cap_raw",
+    })
+    df["market_cap"] = df["market_cap_raw"].apply(cap_bucket)
+    df = (df.dropna(subset=["ticker", "company"])
+            .drop_duplicates(subset=["ticker"])
+            [["ticker", "company", "sector", "industry", "market_cap", "exchange"]])
+
+    conn = sqlite3.connect(db_path)
+    df.to_sql("stocks", conn, if_exists="replace", index=False)
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_ticker ON stocks(ticker)")
+    conn.commit()
+    conn.close()
+    return True
+
+_seed_stocks_db()
+
 # ── Import agents after env vars are set ─────────────────────
 from finagents import run_single_agent_chat, run_multi_agent_chat, MODEL_SMALL, MODEL_LARGE  # noqa: E402
 
