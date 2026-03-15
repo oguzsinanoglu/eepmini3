@@ -455,7 +455,7 @@ def run_specialist_agent(
     raw_data     = {}
 
     for i in range(max_iters):
-        kwargs = {"model": ACTIVE_MODEL, "messages": messages}
+        kwargs = {"model": ACTIVE_MODEL, "messages": messages, "temperature": 0}
         if tool_schemas:
             kwargs["tools"] = tool_schemas
 
@@ -809,6 +809,7 @@ def run_orchestrator(question: str) -> dict:
     """One LLM call to plan which specialists to activate."""
     response = client.chat.completions.create(
         model=ACTIVE_MODEL,
+        temperature=0,
         messages=[
             {"role": "system", "content": ORCHESTRATOR_PROMPT},
             {"role": "user",   "content": question},
@@ -857,6 +858,7 @@ def _critic_one(result: AgentResult, verbose: bool) -> None:
     }
     response = client.chat.completions.create(
         model=ACTIVE_MODEL,
+        temperature=0,
         messages=[
             {"role": "system", "content": CRITIC_PROMPT},
             {"role": "user",   "content": json.dumps(payload)},
@@ -889,6 +891,7 @@ def run_synthesizer(question: str, agent_results: list, price_returns: dict = No
     }
     response = client.chat.completions.create(
         model=ACTIVE_MODEL,
+        temperature=0,
         messages=[
             {"role": "system", "content": SYNTHESIZER_PROMPT},
             {"role": "user",   "content": json.dumps(payload)},
