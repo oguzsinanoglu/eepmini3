@@ -290,9 +290,10 @@ def rank_stocks_by_metric(
     return {"ranked": ranked, "metric": metric, "sector": sector, "descending": descending}
 
 
-def filter_sector_by_52week(sector: str, market_cap: str = "Large") -> dict:
+def filter_sector_by_52week(sector: str, market_cap: str = "Large", max_results: int = 8) -> dict:
     """Fetch stocks for a sector, get their overview, and return those trading
     closer to their 52-week low than their 52-week high (current_price < midpoint).
+    Returns up to max_results stocks sorted by pct_above_low ascending (closest to low first).
     Filtering is done in Python — no LLM guessing.
     """
     sector = _normalize_sector(sector)
@@ -328,10 +329,11 @@ def filter_sector_by_52week(sector: str, market_cap: str = "Large") -> dict:
                 "pct_above_low": round((cur - low) / low * 100, 2) if low else None,
             })
 
+    qualifying.sort(key=lambda r: r["pct_above_low"] if r["pct_above_low"] is not None else 999)
     if not qualifying:
         return {"result": "No stocks found trading closer to their 52-week low.", "sector": sector}
 
-    return {"qualifying": qualifying, "sector": sector, "count": len(qualifying)}
+    return {"qualifying": qualifying[:max_results], "sector": sector, "count": len(qualifying)}
 
 
 ALL_TOOL_FUNCTIONS = {
@@ -473,11 +475,13 @@ SCHEMA_RANK     = _s("rank_stocks_by_metric",
     }, ["sector", "metric"])
 
 SCHEMA_52WEEK   = _s("filter_sector_by_52week",
-    "Return all Large-cap stocks in a sector that are currently trading closer to their 52-week low than their 52-week high. "
-    "Filtering is done in Python using live price data — use this for '52-week low proximity' questions.",
+    "Return stocks in a sector that are trading closer to their 52-week low than their 52-week high. "
+    "Results are sorted by pct_above_low ascending (closest to 52-week low first). "
+    "Use this for '52-week low proximity' questions.",
     {
-        "sector"    : {"type": "string", "description": "Sector name, e.g. 'Financial Services'"},
-        "market_cap": {"type": "string", "enum": ["Large", "Mid", "Small"], "default": "Large"},
+        "sector"     : {"type": "string", "description": "Sector name, e.g. 'Financial Services'"},
+        "market_cap" : {"type": "string", "enum": ["Large", "Mid", "Small"], "default": "Large"},
+        "max_results": {"type": "integer", "default": 8, "description": "Max stocks to return (default 8)"},
     }, ["sector"])
 
 ALL_SCHEMAS = [SCHEMA_TICKERS, SCHEMA_PRICE, SCHEMA_OVERVIEW, SCHEMA_RANK, SCHEMA_52WEEK,
@@ -563,8 +567,8 @@ def run_single_agent(question: str, verbose: bool = False) -> AgentResult:
 # ═══════════════════════════════════════════════════════════════
 
 MARKET_TOOLS      = [SCHEMA_TICKERS, SCHEMA_PRICE, SCHEMA_STATUS, SCHEMA_MOVERS]
-FUNDAMENTAL_TOOLS = [SCHEMA_OVERVIEW, SCHEMA_RANK, SCHEMA_SQL, SCHEMA_TICKERS]
-SENTIMENT_TOOLS   = [SCHEMA_NEWS, SCHEMA_SQL]
+FUNDAMENTAL_TOOLS = [SCHEMA_OVERVIEW, SCHEMA_RANK, SCHEMA_52WEEK, SCHEMA_SQL, SCHEMA_TICKERS]
+SENTIMENT_TOOLS   = [SCHEMA_NEWS, SCHEMA_52WEEK, SCHEMA_SQL]
 
 ORCHESTRATOR_PROMPT = """You are a query router for a financial multi-agent system.
 Given a user question, you decide which specialist agents to activate and write a focused sub-task for each one.
@@ -576,11 +580,13 @@ Specialists available:
 
 RULES:
 1. Only activate specialists that are STRICTLY needed to answer the question.
-   - Questions about P/E, EPS, market cap, or 52-week range → "Fundamentals" ONLY. Do NOT add Price or Sentiment.
+   - Questions about P/E, EPS, market cap, or 52-week range (without sentiment) → "Fundamentals" ONLY.
    - Questions about price change / performance → "Price" ONLY (unless also asking for fundamentals).
-   - Questions about news or sentiment → "Sentiment" ONLY (unless also asking for price or fundamentals).
+   - Questions about news or sentiment (with specific tickers) → "Sentiment" ONLY.
    - Only combine multiple specialists when the question explicitly asks for multiple domains in one answer.
-2. Detect a cross-domain ranking dependency: if the question first ranks by price/return and then asks for fundamentals or sentiment of the top results (a DIFFERENT domain), set "phased": true and name the Phase 1 agent as "phase1_agent": "Price".
+2. Detect a cross-domain dependency and use phased execution:
+   a) Price-then-fundamentals/sentiment: question ranks by price/return then asks fundamentals or sentiment of top results → set "phased": true, "phase1_agent": "Price".
+   b) 52-week-then-sentiment: question asks which SECTOR stocks are closer to 52-week low AND also requests news sentiment → set "phased": true, "phase1_agent": "Fundamentals", agents: ["Fundamentals", "Sentiment"]. The Fundamentals agent identifies qualifying stocks; Sentiment receives those tickers as a hint.
 3. Write a concise, self-contained sub-task string for each activated specialist. The sub-task must include any ticker symbols mentioned in the original question.
 4. Return ONLY valid JSON — no prose before or after.
 5. Always activate at least one specialist — never return an empty "agents" list. If the question is purely about DB/sector lookup (e.g., "list companies in database"), activate "Price" (it has get_tickers_by_sector).
@@ -633,13 +639,19 @@ SECTOR RANKING PROTOCOL — follow these steps EXACTLY when asked to rank/find t
 1. Call rank_stocks_by_metric(sector=..., metric="pe_ratio", top_n=5, descending=True).
    This handles SQL lookup + data fetching + Python sort internally. The result is already correctly sorted.
 2. Report the ranked list from the result directly.
+IMPORTANT: Use rank_stocks_by_metric for ALL sector ranking questions. Do NOT call query_local_db + get_company_overview manually for ranking.
 
-IMPORTANT: Use rank_stocks_by_metric for ALL sector ranking questions. Do NOT call query_local_db + get_company_overview manually for ranking."""
+52-WEEK LOW PROXIMITY PROTOCOL — follow these steps EXACTLY when asked which stocks are closer to their 52-week low:
+1. Call filter_sector_by_52week(sector=...) ONCE.
+   It returns qualifying stocks with current_price, week_high_52, week_low_52, and pct_above_low, sorted closest-to-low first.
+2. Report the qualifying list directly. DO NOT call get_company_overview separately.
+IMPORTANT: Use filter_sector_by_52week for ALL 52-week low proximity questions."""
 
 SENTIMENT_AGENT_PROMPT = """You are a news and sentiment specialist with access to real-time news headlines and sentiment scores for individual stocks.
 Summarise sentiment clearly: Bullish / Bearish / Neutral with score.
 If a tool fails or returns no articles, say so explicitly. Do not fabricate headlines.
-IMPORTANT: Only fetch sentiment for the specific tickers listed in your task."""
+IMPORTANT: Only fetch sentiment for the specific tickers listed in your task.
+If your task requests sentiment for a sector but gives no specific tickers, first call filter_sector_by_52week(sector=...) to get the qualifying ticker list, then call get_news_sentiment for each ticker returned."""
 
 CRITIC_PROMPT = """You are a financial fact-checker evaluating a single specialist agent.
 You are given the agent's answer and the raw tool data it actually retrieved.
@@ -791,13 +803,25 @@ def run_synthesizer(question: str, agent_results: list, price_returns: dict = No
 
 def _extract_tickers_from_result(result: AgentResult, top_n: int = 3) -> list:
     tickers = []
+    seen = set()
     for tool_output in result.raw_data.values():
         if not isinstance(tool_output, dict):
             continue
+        # Price agent format: {TICKER: {"pct_change": float}}
         for k, v in tool_output.items():
             if (isinstance(k, str) and k.isupper() and 1 <= len(k) <= 5
-                    and isinstance(v, dict) and "pct_change" in v):
+                    and isinstance(v, dict) and "pct_change" in v
+                    and k not in seen):
                 tickers.append((k, float(v["pct_change"])))
+                seen.add(k)
+        # filter_sector_by_52week format: {"qualifying": [{"ticker": ..., "pct_above_low": float}]}
+        if "qualifying" in tool_output:
+            for item in tool_output["qualifying"]:
+                t = item.get("ticker", "")
+                if t and t not in seen:
+                    # negate pct_above_low so sort(reverse=True) puts closest-to-low first
+                    tickers.append((t, -(item.get("pct_above_low") or 999)))
+                    seen.add(t)
     tickers.sort(key=lambda x: x[1], reverse=True)
     return [t[0] for t in tickers[:top_n]]
 
@@ -824,7 +848,8 @@ def run_multi_agent(question: str, verbose: bool = False) -> dict:
         p1_result = SPECIALIST_RUNNERS[p1_name](p1_task, verbose=verbose)
         agent_results.append(p1_result)
 
-        top_tickers = _extract_tickers_from_result(p1_result, top_n=3)
+        _p1_top_n = 8 if p1_name == "Fundamentals" else 3
+        top_tickers = _extract_tickers_from_result(p1_result, top_n=_p1_top_n)
         _all_returns = {
             k: round(float(v["pct_change"]), 2)
             for to in p1_result.raw_data.values() if isinstance(to, dict)
