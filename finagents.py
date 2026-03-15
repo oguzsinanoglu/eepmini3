@@ -592,7 +592,7 @@ RULES:
    - Include the EXACT sector name from the original question verbatim (e.g. if the question says "finance sector", the sub-task must say "finance sector", not "financial sector", not "Financial Services", not any other substitution). The specialist agent resolves the canonical name itself.
 4. Return ONLY valid JSON — no prose before or after.
 5. Always activate at least one specialist — never return an empty "agents" list. If the question is purely about DB/sector lookup (e.g., "list companies in database"), activate "Price" (it has get_tickers_by_sector).
-6. For questions requiring TWO time-period conditions on the SAME stocks (e.g., "dropped this month but grew this year", "fell recently but up this year", "which stocks went up/down over two periods"): this is ALWAYS a Price question. Set "phased": false, assign ONLY "Price". DO NOT route to Fundamentals even if the question says "top N" — the top-N here ranks by price return, not by P/E or market cap. Sub-task template: "Fetch 1mo AND ytd performance for [sector] tickers. Filter: 1mo<0 AND ytd>0. Return top 3 by ytd."
+6. For questions requiring TWO time-period conditions on the SAME stocks (e.g., "dropped this month but grew this year", "fell recently but up this year", "which stocks went up/down over two periods"): this is ALWAYS a Price question. Set "phased": false, assign ONLY "Price". DO NOT route to Fundamentals even if the question says "top N" — the top-N here ranks by price return, not by P/E or market cap. Sub-task template: "Fetch 1mo AND ytd performance for [sector] tickers. You MUST call get_price_performance twice: once for period=1mo and once for period=ytd. Filter: 1mo<0 AND ytd>0. Return top 3 by ytd. Report both 1mo% and ytd% for each result."
 
 Return format:
 {
@@ -625,11 +625,14 @@ A) COMPARISON (multiple specific tickers): Report ALL requested tickers: TICKER:
 B) SINGLE TICKER: TICKER: start=$X.XX  end=$X.XX  change=+Y.YY%
 C) SECTOR RANKING (top-N): List top-N from sorted scratchpad: 1. TICKER: +X.XX%
 
-MULTI-CONDITION FILTERING PROTOCOL:
+MULTI-CONDITION FILTERING PROTOCOL — MANDATORY for questions with two time-period conditions (e.g., "dropped this month but grew this year"):
 1. Call get_tickers_by_sector to get the ticker list if not provided.
 2. Call get_price_performance ONCE for period=1mo with ALL tickers.
 3. Call get_price_performance ONCE for period=ytd with ALL tickers.
-4. Build a dual scratchpad. Filter and sort. Report both 1mo% and ytd%.
+   YOU MUST MAKE BOTH CALLS BEFORE ANSWERING. Do not skip step 3.
+4. Build a dual scratchpad pairing each ticker's 1mo% and ytd%. Apply both filters (e.g., 1mo<0 AND ytd>0). Sort filtered results by ytd descending. Select top-N.
+5. Report BOTH values for every qualifying stock. If a ticker genuinely has no ytd data, write "ytd: no data" — do NOT write N/A or omit it.
+6. If no stocks pass both filters, say so explicitly: "No tech stocks satisfied both conditions (1mo<0 AND ytd>0)."
 
 Always report the exact numeric pct_change for every stock you mention."""
 
