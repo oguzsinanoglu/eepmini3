@@ -643,8 +643,11 @@ IMPORTANT: Use rank_stocks_by_metric for ALL sector ranking questions. Do NOT ca
 
 52-WEEK LOW PROXIMITY PROTOCOL — follow these steps EXACTLY when asked which stocks are closer to their 52-week low:
 1. Call filter_sector_by_52week(sector=...) ONCE.
-   It returns qualifying stocks with current_price, week_high_52, week_low_52, and pct_above_low, sorted closest-to-low first.
-2. Report the qualifying list directly. DO NOT call get_company_overview separately.
+   It returns qualifying stocks with ticker, name, current_price, week_high_52, week_low_52, and pct_above_low, sorted closest-to-low first.
+2. Report EVERY qualifying stock in this exact format per line:
+   TICKER (Company Name): current $X.XX | 52-week $LOW - $HIGH | X.XX% above low
+   Always include the company name from the "name" field.
+   DO NOT call get_company_overview separately.
 IMPORTANT: Use filter_sector_by_52week for ALL 52-week low proximity questions."""
 
 SENTIMENT_AGENT_PROMPT = """You are a news and sentiment specialist with access to real-time news headlines and sentiment scores for individual stocks.
@@ -701,7 +704,7 @@ OUTPUT RULES:
    - Include ALL key numeric values from the specialist answers.
    - For SENTIMENT: list EVERY headline with its exact label and score.
    - For SINGLE-TICKER PRICE: report start, end, AND % change.
-   - For 52-WEEK RANGE FILTER: for each qualifying stock report TICKER (Company Name): current price, 52-week low, 52-week high, and how close to low (% above low). Then include the full sentiment block requested.
+   - For 52-WEEK RANGE FILTER: for each qualifying stock report TICKER (Company Name): current $X.XX | 52-week $LOW - $HIGH | X.XX% above low | Sentiment: Label (score), Label (score), ... Always include the company name in parentheses after the ticker — it is present in the specialist answer.
    - For MULTI-CONDITION FILTER: list every qualifying stock with BOTH 1-month % AND YTD %.
    - Draw facts from specialist_answers only.
    - No markdown, no bullet points, no headers.
