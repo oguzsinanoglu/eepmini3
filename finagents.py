@@ -383,7 +383,12 @@ CRITICAL RULES:
 - When ranking or filtering results, show the actual numbers you used to make the determination.
 - Use the exact numerical values provided by the tools. DO NOT round or APPROXIMATE.
 
-CONVERSATIONAL CONTEXT: If the user refers to "that", "it", "the two", or similar pronouns, use the conversation history provided to resolve the reference before fetching data."""
+CONVERSATIONAL CONTEXT: If the user refers to "that", "it", "the two", or similar pronouns, use the conversation history provided to resolve the reference before fetching data.
+
+OUTPUT FORMAT:
+- For ranking questions ("top N by P/E", "best by market cap", etc.): one line per stock. FORMAT: N. TICKER (Company Name): P/E X.XX | EPS X.XX | Market Cap $X.XXB. No intro, no conclusion.
+- For single-ticker questions: report the key metric(s) asked for plus 52-week range in 2-3 sentences max.
+- For all other questions: answer concisely in plain prose, no bullet points, no markdown headers."""
 
 
 def run_single_agent(question: str, verbose: bool = False) -> AgentResult:
@@ -517,7 +522,12 @@ OUTPUT RULES:
    - Get P/E and Sentiment from specialist_answers. Write N/A only if truly absent.
    - No company names, no intro sentence, no conclusion, no blank lines.
 
-2. PROSE FORMAT — use for all other questions:
+2. RANKING FORMAT — use when the question asks to rank or find "top N" stocks by a metric (P/E, market cap, EPS, etc.) and price_returns is empty:
+   - One line per stock. FORMAT: N. TICKER (Company Name): P/E X.XX | EPS X.XX | Market Cap $X.XXB
+   - Include only the fields the question asks about plus any extra fields present in the specialist answer. Omit fields that are "None" or "N/A".
+   - No intro sentence, no conclusion, no blank lines between entries.
+
+3. PROSE FORMAT — use for all other questions:
    - Include ALL key numeric values from the specialist answers.
    - For SENTIMENT: list EVERY headline with its exact label and score.
    - For SINGLE-TICKER PRICE: report start, end, AND % change.
