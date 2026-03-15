@@ -592,6 +592,7 @@ OUTPUT RULES:
 
 2. RANKING FORMAT — use when the question asks to rank or find "top N" stocks by a metric (P/E, market cap, EPS, etc.) and price_returns is empty:
    - One line per stock. FORMAT: N. TICKER (Company Name): P/E X.XX | EPS X.XX | Market Cap $X.XXB
+   - Always include the company name in parentheses after the ticker. If not available, omit the parentheses.
    - Include only the fields the question asks about plus any extra fields present in the specialist answer. Omit fields that are "None" or "N/A".
    - No intro sentence, no conclusion, no blank lines between entries.
 
