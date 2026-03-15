@@ -587,7 +587,9 @@ RULES:
 2. Detect a cross-domain dependency and use phased execution:
    a) Price-then-fundamentals/sentiment: question ranks by price/return then asks fundamentals or sentiment of top results → set "phased": true, "phase1_agent": "Price".
    b) 52-week-then-sentiment: question asks which SECTOR stocks are closer to 52-week low AND also requests news sentiment → set "phased": true, "phase1_agent": "Fundamentals", agents: ["Fundamentals", "Sentiment"]. The Fundamentals agent identifies qualifying stocks; Sentiment receives those tickers as a hint.
-3. Write a concise, self-contained sub-task string for each activated specialist. The sub-task must include any ticker symbols mentioned in the original question.
+3. Write a concise, self-contained sub-task string for each activated specialist. The sub-task must:
+   - Include any ticker symbols mentioned in the original question.
+   - Include the EXACT sector name from the original question verbatim (e.g. if the question says "finance sector", the sub-task must say "finance sector", not "financial sector", not "Financial Services", not any other substitution). The specialist agent resolves the canonical name itself.
 4. Return ONLY valid JSON — no prose before or after.
 5. Always activate at least one specialist — never return an empty "agents" list. If the question is purely about DB/sector lookup (e.g., "list companies in database"), activate "Price" (it has get_tickers_by_sector).
 6. For questions requiring TWO time-period conditions on the SAME stocks (e.g., "dropped this month but grew this year"), set "phased": false, assign ONLY "Price", and write the sub-task as: "Fetch 1mo AND ytd performance for [sector] tickers. Filter: 1mo<0 AND ytd>0. Return top 3 by ytd."
@@ -642,11 +644,13 @@ SECTOR RANKING PROTOCOL — follow these steps EXACTLY when asked to rank/find t
 IMPORTANT: Use rank_stocks_by_metric for ALL sector ranking questions. Do NOT call query_local_db + get_company_overview manually for ranking.
 
 52-WEEK LOW PROXIMITY PROTOCOL — follow these steps EXACTLY when asked which stocks are closer to their 52-week low:
-1. Call filter_sector_by_52week(sector=...) ONCE.
+1. Identify the sector name from your task. Pass it EXACTLY as written (e.g. if task says "finance sector", call filter_sector_by_52week(sector="finance")). Do NOT substitute a different sector name from your training knowledge.
+2. Call filter_sector_by_52week(sector=<sector from task>) ONCE.
    It returns qualifying stocks with ticker, name, current_price, week_high_52, week_low_52, and pct_above_low, sorted closest-to-low first.
-2. Report EVERY qualifying stock in this exact format per line:
+3. Report EVERY qualifying stock in this exact format per line:
    TICKER (Company Name): current $X.XX | 52-week $LOW - $HIGH | X.XX% above low
-   Always include the company name from the "name" field.
+   Use the EXACT "ticker" field value from the tool result (e.g. "BRO", "BX"). NEVER substitute a company name or abbreviation as a ticker.
+   Use the "name" field for the company name in parentheses.
    DO NOT call get_company_overview separately.
 IMPORTANT: Use filter_sector_by_52week for ALL 52-week low proximity questions."""
 
