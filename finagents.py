@@ -630,9 +630,15 @@ MULTI-CONDITION FILTERING PROTOCOL — MANDATORY for questions with two time-per
 2. Call get_price_performance ONCE for period=1mo with ALL tickers.
 3. Call get_price_performance ONCE for period=ytd with ALL tickers.
    YOU MUST MAKE BOTH CALLS BEFORE ANSWERING. Do not skip step 3.
-4. Build a dual scratchpad pairing each ticker's 1mo% and ytd%. Apply both filters (e.g., 1mo<0 AND ytd>0). Sort filtered results by ytd descending. Select top-N.
-5. Report BOTH values for every qualifying stock. If a ticker genuinely has no ytd data, write "ytd: no data" — do NOT write N/A or omit it.
-6. If no stocks pass both filters, say so explicitly: "No tech stocks satisfied both conditions (1mo<0 AND ytd>0)."
+4. Build a dual scratchpad: for each ticker write down its exact 1mo% AND ytd% side by side.
+5. Apply filters mechanically — check each ticker individually:
+   - "dropped this month" = 1mo% < 0 (negative number)
+   - "grew this year" = ytd% > 0 (positive number)
+   A ticker passes if AND ONLY IF BOTH values satisfy their respective condition.
+   IMPORTANT: -7.53% IS negative (passes "dropped"); +14.13% IS positive (passes "grew"). Do arithmetic checks, not pattern matching.
+6. Sort passing tickers by ytd% descending. Select top-N.
+7. Report BOTH values for every qualifying stock.
+8. Only say "no stocks satisfied both conditions" if your scratchpad shows zero tickers passing step 5. If ANY ticker passes, report it — never contradict your own data.
 
 Always report the exact numeric pct_change for every stock you mention."""
 
