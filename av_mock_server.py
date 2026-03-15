@@ -23,16 +23,25 @@ from pytz import timezone
 
 app = Flask(__name__)
 
-_info_cache = {}
+_INFO_CACHE_TTL = 300  # seconds; re-fetch after 5 minutes or on failure
+_info_cache: dict = {}  # ticker -> (fetched_at: float, data: dict | None)
 
 def _get_info(ticker):
-    """yfinance .info with caching."""
-    if ticker not in _info_cache:
-        try:
-            _info_cache[ticker] = yf.Ticker(ticker).info
-        except Exception:
-            _info_cache[ticker] = None
-    return _info_cache[ticker]
+    """yfinance .info with TTL caching. Failed/None results are NOT cached
+    so they are retried on the next call."""
+    entry = _info_cache.get(ticker)
+    if entry is not None:
+        fetched_at, data = entry
+        if time.time() - fetched_at < _INFO_CACHE_TTL:
+            return data
+    try:
+        data = yf.Ticker(ticker).info
+        if data and data.get("shortName"):  # only cache valid responses
+            _info_cache[ticker] = (time.time(), data)
+            return data
+    except Exception:
+        pass
+    return None  # not cached — will be retried next call
 
 
 def _is_market_open(tz_name, open_h, open_m, close_h, close_m):
@@ -51,13 +60,12 @@ def _handle_overview(params):
 
     info = _get_info(ticker)
 
-    if info and info.get("shortName"):
-        def safe(val):
-            return "None" if val is None else str(val)
+    def safe(val):
+        return "None" if val is None else str(val)
 
+    if info and info.get("shortName"):
         pe = info.get("trailingPE") or info.get("forwardPE")
         eps = info.get("trailingEps") or info.get("forwardEps")
-
         return {
             "Symbol": ticker,
             "Name": info.get("shortName", ticker),
@@ -71,7 +79,24 @@ def _handle_overview(params):
             "DividendYield": safe(info.get("dividendYield")),
             "Beta": safe(info.get("beta")),
         }
-    else:
+
+    # Fallback: fast_info hits a lighter Yahoo endpoint, less rate-limited
+    try:
+        fi = yf.Ticker(ticker).fast_info
+        return {
+            "Symbol": ticker,
+            "Name": ticker,
+            "Sector": "N/A",
+            "Industry": "N/A",
+            "MarketCapitalization": safe(getattr(fi, "market_cap", None)),
+            "PERatio": "None",
+            "EPS": "None",
+            "52WeekHigh": safe(getattr(fi, "fifty_two_week_high", None)),
+            "52WeekLow": safe(getattr(fi, "fifty_two_week_low", None)),
+            "DividendYield": "None",
+            "Beta": "None",
+        }
+    except Exception:
         return {}
 
 
