@@ -188,6 +188,7 @@ def _handle_overview(params):
     if info and info.get("shortName"):
         pe = info.get("trailingPE") or info.get("forwardPE")
         eps = info.get("trailingEps") or info.get("forwardEps")
+        current_price = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose")
         return {
             "Symbol": ticker,
             "Name": info.get("shortName", ticker),
@@ -198,6 +199,7 @@ def _handle_overview(params):
             "EPS": safe(eps),
             "52WeekHigh": safe(info.get("fiftyTwoWeekHigh")),
             "52WeekLow": safe(info.get("fiftyTwoWeekLow")),
+            "CurrentPrice": safe(current_price),
             "DividendYield": safe(info.get("dividendYield")),
             "Beta": safe(info.get("beta")),
         }
@@ -215,6 +217,7 @@ def _handle_overview(params):
             "EPS": "None",
             "52WeekHigh": safe(getattr(fi, "fifty_two_week_high", None)),
             "52WeekLow": safe(getattr(fi, "fifty_two_week_low", None)),
+            "CurrentPrice": safe(getattr(fi, "last_price", None)),
             "DividendYield": "None",
             "Beta": "None",
         }

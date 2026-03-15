@@ -165,14 +165,15 @@ def get_company_overview(ticker: str) -> dict:
         if not data or "Name" not in data:
             return {"error": f"No overview data found for ticker '{ticker}'"}
         return {
-            "ticker"      : ticker,
-            "name"        : data.get("Name", ""),
-            "sector"      : data.get("Sector", ""),
-            "pe_ratio"    : data.get("PERatio", "N/A"),
-            "eps"         : data.get("EPS", "N/A"),
-            "market_cap"  : data.get("MarketCapitalization", "N/A"),
-            "week_high_52": data.get("52WeekHigh", "N/A"),
-            "week_low_52" : data.get("52WeekLow", "N/A"),
+            "ticker"        : ticker,
+            "name"          : data.get("Name", ""),
+            "sector"        : data.get("Sector", ""),
+            "pe_ratio"      : data.get("PERatio", "N/A"),
+            "eps"           : data.get("EPS", "N/A"),
+            "market_cap"    : data.get("MarketCapitalization", "N/A"),
+            "week_high_52"  : data.get("52WeekHigh", "N/A"),
+            "week_low_52"   : data.get("52WeekLow", "N/A"),
+            "current_price" : data.get("CurrentPrice", "N/A"),
         }
     except Exception as e:
         return {"error": str(e)}
@@ -289,15 +290,60 @@ def rank_stocks_by_metric(
     return {"ranked": ranked, "metric": metric, "sector": sector, "descending": descending}
 
 
+def filter_sector_by_52week(sector: str, market_cap: str = "Large") -> dict:
+    """Fetch stocks for a sector, get their overview, and return those trading
+    closer to their 52-week low than their 52-week high (current_price < midpoint).
+    Filtering is done in Python — no LLM guessing.
+    """
+    sector = _normalize_sector(sector)
+    conn = sqlite3.connect(DB_PATH)
+    df = pd.read_sql_query(
+        "SELECT ticker FROM stocks "
+        "WHERE LOWER(sector) LIKE ('%' || LOWER(?) || '%') "
+        "  AND market_cap = ? ORDER BY ticker LIMIT 30",
+        conn, params=[sector, market_cap])
+    conn.close()
+
+    if df.empty:
+        return {"error": f"No {market_cap}-cap stocks found for sector '{sector}'"}
+
+    qualifying = []
+    for t in df["ticker"].tolist():
+        ov = get_company_overview(t)
+        if "error" in ov:
+            continue
+        try:
+            high = float(ov.get("week_high_52", "None"))
+            low  = float(ov.get("week_low_52",  "None"))
+            cur  = float(ov.get("current_price", "None"))
+        except (TypeError, ValueError):
+            continue
+        if cur < (high + low) / 2:  # closer to 52-week low
+            qualifying.append({
+                "ticker"       : t,
+                "name"         : ov.get("name", ""),
+                "current_price": cur,
+                "week_high_52" : high,
+                "week_low_52"  : low,
+                "pct_above_low": round((cur - low) / low * 100, 2) if low else None,
+            })
+
+    if not qualifying:
+        return {"result": "No stocks found trading closer to their 52-week low.", "sector": sector}
+
+    return {"qualifying": qualifying, "sector": sector, "count": len(qualifying)}
+
+
 ALL_TOOL_FUNCTIONS = {
-    "get_tickers_by_sector" : get_tickers_by_sector,
-    "get_price_performance" : get_price_performance,
-    "get_company_overview"  : get_company_overview,
-    "rank_stocks_by_metric" : rank_stocks_by_metric,
-    "get_market_status"     : get_market_status,
-    "get_top_gainers_losers": get_top_gainers_losers,
-    "get_news_sentiment"    : get_news_sentiment,
-    "query_local_db"        : query_local_db,
+    "get_tickers_by_sector"    : get_tickers_by_sector,
+    "get_price_performance"    : get_price_performance,
+    "get_company_overview"     : get_company_overview,
+    "rank_stocks_by_metric"    : rank_stocks_by_metric,
+    "filter_sector_by_52week"  : filter_sector_by_52week,
+    "get_market_status"        : get_market_status,
+    "get_top_gainers_losers"   : get_top_gainers_losers,
+    "get_news_sentiment"       : get_news_sentiment,
+    "query_local_db"           : query_local_db,
 }
 
 
@@ -426,7 +472,15 @@ SCHEMA_RANK     = _s("rank_stocks_by_metric",
         "market_cap" : {"type": "string", "enum": ["Large", "Mid", "Small"], "default": "Large"},
     }, ["sector", "metric"])
 
-ALL_SCHEMAS = [SCHEMA_TICKERS, SCHEMA_PRICE, SCHEMA_OVERVIEW, SCHEMA_RANK,
+SCHEMA_52WEEK   = _s("filter_sector_by_52week",
+    "Return all Large-cap stocks in a sector that are currently trading closer to their 52-week low than their 52-week high. "
+    "Filtering is done in Python using live price data — use this for '52-week low proximity' questions.",
+    {
+        "sector"    : {"type": "string", "description": "Sector name, e.g. 'Financial Services'"},
+        "market_cap": {"type": "string", "enum": ["Large", "Mid", "Small"], "default": "Large"},
+    }, ["sector"])
+
+ALL_SCHEMAS = [SCHEMA_TICKERS, SCHEMA_PRICE, SCHEMA_OVERVIEW, SCHEMA_RANK, SCHEMA_52WEEK,
                SCHEMA_STATUS, SCHEMA_MOVERS, SCHEMA_NEWS, SCHEMA_SQL]
 
 
@@ -472,6 +526,9 @@ CRITICAL RULES:
   Call rank_stocks_by_metric(sector=..., metric=..., top_n=N, descending=True).
   This tool handles SQL lookup + data fetching + sorting in Python — the result is already correctly ordered. Report it as-is.
   DO NOT use get_tickers_by_sector or query_local_db for ranking — use rank_stocks_by_metric.
+- For 52-WEEK LOW PROXIMITY questions ("closer to 52-week low", "near 52-week low", "trading near their lows"):
+  Call filter_sector_by_52week(sector=...) FIRST. It returns only the qualifying stocks with current_price, week_high_52, week_low_52, and pct_above_low.
+  Then call get_news_sentiment for each qualifying ticker (up to 5). DO NOT call get_company_overview separately — all 52-week data is already in the filter result.
 - For other sector/industry questions (non-ranking): use get_tickers_by_sector or query_local_db to get tickers, THEN fetch data. Never guess tickers.
 - For comparison questions: Fetch data for ALL tickers mentioned, then compare.
 - For multi-condition questions (e.g., "dropped this month but grew this year"): Fetch data for BOTH time periods, then filter and compare.
@@ -485,6 +542,7 @@ CONVERSATIONAL CONTEXT: If the user refers to "that", "it", "the two", or simila
 
 OUTPUT FORMAT:
 - For ranking questions ("top N by P/E", "best by market cap", etc.): one line per stock. FORMAT: N. TICKER (Company Name): P/E X.XX | EPS X.XX | Market Cap $X.XXB. No intro, no conclusion.
+- For 52-week proximity questions: one block per stock. FORMAT: TICKER (Company Name): current $X.XX | 52-week $LOW - $HIGH | X.XX% above low. News: [headline label (score), ...]. Separate stocks with a blank line.
 - For single-ticker questions: report the key metric(s) asked for plus 52-week range in 2-3 sentences max.
 - For all other questions: answer concisely in plain prose, no bullet points, no markdown headers."""
 
@@ -612,7 +670,10 @@ You receive a JSON object with three fields:
 
 OUTPUT RULES:
 
-1. TABLE FORMAT — use ONLY when price_returns contains 2 or more tickers:
+1. TABLE FORMAT — use ONLY when ALL of these are true:
+   a) price_returns contains 2 or more tickers, AND
+   b) the original_question explicitly asks for price % change or performance (e.g. "which gained most", "top performers", "price change").
+   DO NOT use TABLE FORMAT for questions about 52-week range, P/E, sentiment, or any question where price % is just used internally as a filter.
    - Output exactly one line per ticker. FORMAT: TICKER: +X.XX% | P/E X.XX | Sentiment: Label (score)
    - Use the exact float from price_returns for %. Prefix positive with +.
    - Get P/E and Sentiment from specialist_answers. Write N/A only if truly absent.
@@ -628,6 +689,7 @@ OUTPUT RULES:
    - Include ALL key numeric values from the specialist answers.
    - For SENTIMENT: list EVERY headline with its exact label and score.
    - For SINGLE-TICKER PRICE: report start, end, AND % change.
+   - For 52-WEEK RANGE FILTER: for each qualifying stock report TICKER (Company Name): current price, 52-week low, 52-week high, and how close to low (% above low). Then include the full sentiment block requested.
    - For MULTI-CONDITION FILTER: list every qualifying stock with BOTH 1-month % AND YTD %.
    - Draw facts from specialist_answers only.
    - No markdown, no bullet points, no headers.
