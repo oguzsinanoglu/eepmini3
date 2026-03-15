@@ -466,6 +466,60 @@ def filter_sector_by_min_return(
     }
 
 
+def rank_sector_by_return(
+    sector: str,
+    period: str = "1y",
+    top_n: int = 3,
+    market_cap: str = "Large",
+) -> dict:
+    """Fetch ALL tickers for a sector/industry, download price returns for ONE period,
+    sort descending, and return the top-N ranked by return.
+    Use for 'top N by 1-year return', 'best performers this year', etc.
+    Fully deterministic — no LLM sorting required.
+    """
+    sector = _normalize_sector(sector)
+    conn = sqlite3.connect(DB_PATH)
+    if market_cap:
+        df = pd.read_sql_query(
+            "SELECT ticker, company FROM stocks "
+            "WHERE (LOWER(sector) LIKE ('%' || LOWER(?) || '%') "
+            "   OR  LOWER(industry) LIKE ('%' || LOWER(?) || '%')) "
+            "  AND market_cap = ? ORDER BY ticker LIMIT 60",
+            conn, params=[sector, sector, market_cap])
+    else:
+        df = pd.read_sql_query(
+            "SELECT ticker, company FROM stocks "
+            "WHERE  LOWER(sector) LIKE ('%' || LOWER(?) || '%') "
+            "   OR  LOWER(industry) LIKE ('%' || LOWER(?) || '%') "
+            "ORDER BY ticker LIMIT 60",
+            conn, params=[sector, sector])
+    conn.close()
+
+    if df.empty:
+        return {"error": f"No stocks found for sector/industry '{sector}'"}
+
+    name_map = dict(zip(df["ticker"], df["company"]))
+    tickers = df["ticker"].tolist()
+    perf = get_price_performance(tickers, period=period)
+
+    rows = []
+    for t in tickers:
+        v = perf.get(t, {})
+        if isinstance(v, dict) and "pct_change" in v:
+            rows.append({"ticker": t, "_pct": float(v["pct_change"])})
+
+    rows.sort(key=lambda r: r["_pct"], reverse=True)
+    return {
+        "results": [
+            {"ticker": r["ticker"], "name": name_map.get(r["ticker"], ""), period: f"{r['_pct']:+.2f}"}
+            for r in rows[:top_n]
+        ],
+        "total_ranked": len(rows),
+        "sector": sector,
+        "period": period,
+    }
+
+
 ALL_TOOL_FUNCTIONS = {
     "get_tickers_by_sector"             : get_tickers_by_sector,
     "get_price_performance"             : get_price_performance,
@@ -474,6 +528,7 @@ ALL_TOOL_FUNCTIONS = {
     "filter_sector_by_52week"           : filter_sector_by_52week,
     "filter_sector_by_return_conditions": filter_sector_by_return_conditions,
     "filter_sector_by_min_return"       : filter_sector_by_min_return,
+    "rank_sector_by_return"             : rank_sector_by_return,
     "get_market_status"                 : get_market_status,
     "get_top_gainers_losers"            : get_top_gainers_losers,
     "get_news_sentiment"                : get_news_sentiment,
@@ -616,6 +671,19 @@ SCHEMA_52WEEK   = _s("filter_sector_by_52week",
         "max_results": {"type": "integer", "default": 8, "description": "Max stocks to return (default 8)"},
     }, ["sector"])
 
+SCHEMA_RANK_RETURN = _s("rank_sector_by_return",
+    "Fetch ALL tickers for a sector or industry (e.g. 'semiconductor'), download price returns for "
+    "ONE period, sort descending, and return the top-N ranked by return. "
+    "Use for questions like 'top 3 semiconductor stocks by 1-year return' or "
+    "'best performing energy stocks this year'. Works on both broad sectors and sub-industries. "
+    "Sorting is guaranteed correct — no LLM arithmetic.",
+    {
+        "sector"    : {"type": "string", "description": "Sector or industry name, e.g. 'semiconductor', 'technology', 'energy'"},
+        "period"    : {"type": "string", "default": "1y", "description": "Period: '1mo','3mo','6mo','ytd','1y'"},
+        "top_n"     : {"type": "integer", "default": 3, "description": "How many top stocks to return"},
+        "market_cap": {"type": "string", "enum": ["Large", "Mid", "Small", ""], "default": "Large"},
+    }, ["sector"])
+
 SCHEMA_MIN_RETURN = _s("filter_sector_by_min_return",
     "Fetch ALL tickers for a sector, download returns for ONE period, filter to those "
     "with pct_change >= min_pct, sort descending, and return top-N. "
@@ -646,7 +714,7 @@ SCHEMA_RETURN_FILTER = _s("filter_sector_by_return_conditions",
     }, ["sector"])
 
 ALL_SCHEMAS = [SCHEMA_TICKERS, SCHEMA_PRICE, SCHEMA_OVERVIEW, SCHEMA_RANK, SCHEMA_52WEEK,
-               SCHEMA_RETURN_FILTER, SCHEMA_MIN_RETURN, SCHEMA_STATUS, SCHEMA_MOVERS, SCHEMA_NEWS, SCHEMA_SQL]
+               SCHEMA_RETURN_FILTER, SCHEMA_MIN_RETURN, SCHEMA_RANK_RETURN, SCHEMA_STATUS, SCHEMA_MOVERS, SCHEMA_NEWS, SCHEMA_SQL]
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -727,7 +795,7 @@ def run_single_agent(question: str, verbose: bool = False) -> AgentResult:
 # Multi-Agent System
 # ═══════════════════════════════════════════════════════════════
 
-MARKET_TOOLS      = [SCHEMA_TICKERS, SCHEMA_PRICE, SCHEMA_RETURN_FILTER, SCHEMA_MIN_RETURN, SCHEMA_STATUS, SCHEMA_MOVERS]
+MARKET_TOOLS      = [SCHEMA_TICKERS, SCHEMA_PRICE, SCHEMA_RETURN_FILTER, SCHEMA_MIN_RETURN, SCHEMA_RANK_RETURN, SCHEMA_STATUS, SCHEMA_MOVERS]
 FUNDAMENTAL_TOOLS = [SCHEMA_OVERVIEW, SCHEMA_RANK, SCHEMA_52WEEK, SCHEMA_SQL, SCHEMA_TICKERS]
 SENTIMENT_TOOLS   = [SCHEMA_NEWS, SCHEMA_52WEEK, SCHEMA_SQL]
 
@@ -746,7 +814,7 @@ RULES:
    - Questions about news or sentiment (with specific tickers) → "Sentiment" ONLY.
    - Only combine multiple specialists when the question explicitly asks for multiple domains in one answer.
 2. Detect a cross-domain dependency and use phased execution:
-   a) Price-then-fundamentals/sentiment: question ranks by price/return then asks fundamentals or sentiment of top results → set "phased": true, "phase1_agent": "Price".
+   a) Price-then-fundamentals/sentiment: question ranks/filters by price/return then asks fundamentals or sentiment of top results → set "phased": true, "phase1_agent": "Price". Examples: "top 3 semiconductor stocks by 1-year return, what are their P/E ratios", "best energy stocks this year, show their news sentiment". Sub-task for Price: "Call rank_sector_by_return(sector='[sector]', period='[period]', top_n=[N]). Report exactly the tickers and their returns."
    b) 52-week-then-sentiment: question asks which SECTOR stocks are closer to 52-week low AND also requests news sentiment → set "phased": true, "phase1_agent": "Fundamentals", agents: ["Fundamentals", "Sentiment"]. The Fundamentals agent identifies qualifying stocks; Sentiment receives those tickers as a hint.
 3. Write a concise, self-contained sub-task string for each activated specialist. The sub-task must:
    - Include any ticker symbols mentioned in the original question.
@@ -1005,8 +1073,24 @@ def _extract_tickers_from_result(result: AgentResult, top_n: int = 3) -> list:
             for item in tool_output["qualifying"]:
                 t = item.get("ticker", "")
                 if t and t not in seen:
-                    # negate pct_above_low so sort(reverse=True) puts closest-to-low first
                     tickers.append((t, -(item.get("pct_above_low") or 999)))
+                    seen.add(t)
+        # rank_sector_by_return / filter_sector_by_min_return / filter_sector_by_return_conditions
+        # format: {"results": [{"ticker": ..., "name": ..., period: "+XX.XX"}]}
+        if "results" in tool_output:
+            for item in tool_output["results"]:
+                t = item.get("ticker", "")
+                if t and t not in seen:
+                    # Find numeric value from whichever period key is present
+                    pct_val = 0.0
+                    for key, val in item.items():
+                        if key not in ("ticker", "name") and isinstance(val, str):
+                            try:
+                                pct_val = float(val)
+                                break
+                            except ValueError:
+                                pass
+                    tickers.append((t, pct_val))
                     seen.add(t)
     tickers.sort(key=lambda x: x[1], reverse=True)
     return [t[0] for t in tickers[:top_n]]
