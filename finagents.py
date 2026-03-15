@@ -406,6 +406,56 @@ def filter_sector_by_return_conditions(
     }
 
 
+def filter_sector_by_min_return(
+    sector: str,
+    period: str = "ytd",
+    min_pct: float = 20.0,
+    top_n: int = 5,
+    market_cap: str = "Large",
+) -> dict:
+    """Fetch ALL tickers for a sector, download returns for one period, filter to
+    those with pct_change >= min_pct, sort descending, return top_n.
+    Filtering is deterministic — no LLM arithmetic.
+    """
+    sector = _normalize_sector(sector)
+    conn = sqlite3.connect(DB_PATH)
+    if market_cap:
+        df = pd.read_sql_query(
+            "SELECT ticker FROM stocks "
+            "WHERE LOWER(sector) LIKE ('%' || LOWER(?) || '%') "
+            "  AND market_cap = ? ORDER BY ticker LIMIT 60",
+            conn, params=[sector, market_cap])
+    else:
+        df = pd.read_sql_query(
+            "SELECT ticker FROM stocks "
+            "WHERE LOWER(sector) LIKE ('%' || LOWER(?) || '%') "
+            "ORDER BY ticker LIMIT 60",
+            conn, params=[sector])
+    conn.close()
+
+    if df.empty:
+        return {"error": f"No stocks found for sector '{sector}'"}
+
+    tickers = df["ticker"].tolist()
+    perf = get_price_performance(tickers, period=period)
+
+    rows = []
+    for t in tickers:
+        v = perf.get(t, {})
+        if isinstance(v, dict) and "pct_change" in v:
+            pct = float(v["pct_change"])
+            if pct >= min_pct:
+                rows.append({"ticker": t, period: round(pct, 2)})
+
+    rows.sort(key=lambda r: r[period], reverse=True)
+    return {
+        "results": rows[:top_n],
+        "total_qualifying": len(rows),
+        "sector": sector,
+        "filter": f"{period} >= {min_pct}%",
+    }
+
+
 ALL_TOOL_FUNCTIONS = {
     "get_tickers_by_sector"             : get_tickers_by_sector,
     "get_price_performance"             : get_price_performance,
@@ -413,6 +463,7 @@ ALL_TOOL_FUNCTIONS = {
     "rank_stocks_by_metric"             : rank_stocks_by_metric,
     "filter_sector_by_52week"           : filter_sector_by_52week,
     "filter_sector_by_return_conditions": filter_sector_by_return_conditions,
+    "filter_sector_by_min_return"       : filter_sector_by_min_return,
     "get_market_status"                 : get_market_status,
     "get_top_gainers_losers"            : get_top_gainers_losers,
     "get_news_sentiment"                : get_news_sentiment,
@@ -555,6 +606,19 @@ SCHEMA_52WEEK   = _s("filter_sector_by_52week",
         "max_results": {"type": "integer", "default": 8, "description": "Max stocks to return (default 8)"},
     }, ["sector"])
 
+SCHEMA_MIN_RETURN = _s("filter_sector_by_min_return",
+    "Fetch ALL tickers for a sector, download returns for ONE period, filter to those "
+    "with pct_change >= min_pct, sort descending, and return top-N. "
+    "Use this for questions like 'which stocks grew more than 20% this year' or "
+    "'which stocks are up at least 15% this month'. Filtering is deterministic.",
+    {
+        "sector"    : {"type": "string", "description": "Sector name, e.g. 'technology'"},
+        "period"    : {"type": "string", "default": "ytd", "description": "Period: '1mo','3mo','6mo','ytd','1y'"},
+        "min_pct"   : {"type": "number", "default": 20.0, "description": "Minimum % return threshold (e.g. 20 means >=20%)"},
+        "top_n"     : {"type": "integer", "default": 5, "description": "How many results to return"},
+        "market_cap": {"type": "string", "enum": ["Large", "Mid", "Small", ""], "default": "Large"},
+    }, ["sector"])
+
 SCHEMA_RETURN_FILTER = _s("filter_sector_by_return_conditions",
     "Fetch ALL tickers for a sector, download returns for two periods, filter by sign conditions "
     "in Python, sort, and return top-N. Use this for any question like 'which stocks dropped this "
@@ -572,7 +636,7 @@ SCHEMA_RETURN_FILTER = _s("filter_sector_by_return_conditions",
     }, ["sector"])
 
 ALL_SCHEMAS = [SCHEMA_TICKERS, SCHEMA_PRICE, SCHEMA_OVERVIEW, SCHEMA_RANK, SCHEMA_52WEEK,
-               SCHEMA_RETURN_FILTER, SCHEMA_STATUS, SCHEMA_MOVERS, SCHEMA_NEWS, SCHEMA_SQL]
+               SCHEMA_RETURN_FILTER, SCHEMA_MIN_RETURN, SCHEMA_STATUS, SCHEMA_MOVERS, SCHEMA_NEWS, SCHEMA_SQL]
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -653,7 +717,7 @@ def run_single_agent(question: str, verbose: bool = False) -> AgentResult:
 # Multi-Agent System
 # ═══════════════════════════════════════════════════════════════
 
-MARKET_TOOLS      = [SCHEMA_TICKERS, SCHEMA_PRICE, SCHEMA_RETURN_FILTER, SCHEMA_STATUS, SCHEMA_MOVERS]
+MARKET_TOOLS      = [SCHEMA_TICKERS, SCHEMA_PRICE, SCHEMA_RETURN_FILTER, SCHEMA_MIN_RETURN, SCHEMA_STATUS, SCHEMA_MOVERS]
 FUNDAMENTAL_TOOLS = [SCHEMA_OVERVIEW, SCHEMA_RANK, SCHEMA_52WEEK, SCHEMA_SQL, SCHEMA_TICKERS]
 SENTIMENT_TOOLS   = [SCHEMA_NEWS, SCHEMA_52WEEK, SCHEMA_SQL]
 
@@ -680,6 +744,7 @@ RULES:
 4. Return ONLY valid JSON — no prose before or after.
 5. Always activate at least one specialist — never return an empty "agents" list. If the question is purely about DB/sector lookup (e.g., "list companies in database"), activate "Price" (it has get_tickers_by_sector).
 6. For questions requiring TWO time-period conditions on the SAME stocks (e.g., "dropped this month but grew this year", "fell recently but up this year"): this is ALWAYS a Price question. Set "phased": false, assign ONLY "Price". Sub-task template: "Call filter_sector_by_return_conditions(sector='[sector]', period1='1mo', condition1='negative', period2='ytd', condition2='positive', top_n=3). Report the results directly."
+7. For questions asking which stocks in a sector have grown/gained/risen/increased by MORE THAN or AT LEAST a specific percentage over ONE period (e.g. "grown more than 20% this year", "up at least 15% this month", "gained over 30% YTD"): this is ALWAYS a Price question — NOT a Fundamentals question even if the question mentions large-cap or NASDAQ. Set "phased": false, assign ONLY "Price". Sub-task template: "Call filter_sector_by_min_return(sector='[sector]', period='[ytd/1mo/etc]', min_pct=[threshold], top_n=[N]). Report the results directly."
 
 Return format:
 {
@@ -718,6 +783,14 @@ MULTI-CONDITION FILTERING PROTOCOL — for two-period filter questions (e.g., "d
 2. Report the results directly using the EXACT float values from the tool's "results" list. For each entry, output one line:
    TICKER: 1mo [period1 value]% | YTD [period2 value]%
    where [period1 value] and [period2 value] are the actual numbers returned in the JSON (e.g. -3.21, +18.44). NEVER write placeholder text.
+3. Do NOT call get_tickers_by_sector or get_price_performance manually for this type of question.
+
+SINGLE-PERIOD THRESHOLD FILTER PROTOCOL — for questions like "which stocks grew more than 20% this year" or "up at least 15% this month":
+1. Call filter_sector_by_min_return(sector=..., period=..., min_pct=..., top_n=N).
+   This tool fetches ALL sector tickers, downloads the period, filters >= min_pct in Python, and returns sorted results.
+2. Report the results directly using the EXACT float values from the tool's "results" list. For each entry, output one line:
+   TICKER: [period] [value]%
+   using the actual number from the JSON (e.g. 42.67). NEVER write placeholder text.
 3. Do NOT call get_tickers_by_sector or get_price_performance manually for this type of question.
 
 Always report the exact numeric pct_change for every stock you mention."""
@@ -802,6 +875,7 @@ OUTPUT RULES:
      TICKER (Company Name): current $X.XX | 52-week $LOW - $HIGH | X.XX% above low | Sentiment: Label (score), Label (score), ...
      Always include the company name in parentheses — it is present in the specialist answer. Every stock MUST start on its own new line. No two stocks on the same line.
    - For MULTI-CONDITION PRICE FILTER ("dropped this month but grew this year", "top N by return", etc.): list every qualifying stock with BOTH actual numeric values from the tool output. Each stock on its own line. Example (using made-up numbers): "1. AAPL: 1mo -3.21% | YTD +15.44%". Replace the numbers with the EXACT float values returned by the tool — do NOT write placeholder text like X.XX. No company names needed. If the answer says no stocks qualified, relay that verbatim.
+   - For SINGLE-PERIOD THRESHOLD FILTER ("grown more than X% this year", "up at least X%", "gained over X%"): list every qualifying stock with its actual numeric return. Each stock on its own line. Example (using made-up numbers): "1. AAPL: YTD +38.42%". Replace the numbers with the EXACT float values from the specialist answer — do NOT write placeholder text. No company names needed.
    - Draw facts from specialist_answers only.
    - No markdown, no bullet points, no headers.
    - Use numerical values exactly as provided.
