@@ -218,42 +218,82 @@ def query_local_db(sql: str) -> dict:
 
 
 def _overview_from_yf(ticker: str) -> dict | None:
-    """Fetch company overview directly from yfinance using the shared curl_cffi session."""
+    """Fetch company overview directly from yfinance using the shared curl_cffi session.
+    Tries three approaches in order:
+      1) .info  — rich data (name, PE, market cap, 52-week range)
+      2) .fast_info  — lighter endpoint, fewer fields
+      3) .history(1y) — always works; computes 52-week high/low from OHLC data
+    """
     def safe(v):
         return "N/A" if v is None else str(v)
+
+    t = yf.Ticker(ticker, session=_get_yf_session())
+
+    # ── Attempt 1: full .info ──────────────────────────────────
     try:
-        t    = yf.Ticker(ticker, session=_get_yf_session())
         info = t.info or {}
-        if not info.get("shortName") and not info.get("longName"):
-            # Try fast_info as last resort (lighter endpoint)
-            fi = t.fast_info
+        if info.get("shortName") or info.get("longName"):
+            pe  = info.get("trailingPE") or info.get("forwardPE")
+            eps = info.get("trailingEps") or info.get("forwardEps")
+            cur = (info.get("currentPrice") or info.get("regularMarketPrice")
+                   or info.get("previousClose"))
+            return {
+                "ticker"        : ticker,
+                "name"          : info.get("shortName") or info.get("longName", ticker),
+                "sector"        : info.get("sector", "N/A"),
+                "pe_ratio"      : safe(pe),
+                "eps"           : safe(eps),
+                "market_cap"    : safe(info.get("marketCap")),
+                "week_high_52"  : safe(info.get("fiftyTwoWeekHigh")),
+                "week_low_52"   : safe(info.get("fiftyTwoWeekLow")),
+                "current_price" : safe(cur),
+            }
+    except Exception:
+        pass
+
+    # ── Attempt 2: fast_info (lighter endpoint) ───────────────
+    try:
+        fi = t.fast_info
+        high = getattr(fi, "fifty_two_week_high", None)
+        low  = getattr(fi, "fifty_two_week_low",  None)
+        if high is not None and low is not None:
             return {
                 "ticker"        : ticker,
                 "name"          : ticker,
                 "sector"        : "N/A",
                 "pe_ratio"      : "N/A",
                 "eps"           : "N/A",
-                "market_cap"    : safe(getattr(fi, "market_cap",          None)),
-                "week_high_52"  : safe(getattr(fi, "fifty_two_week_high", None)),
-                "week_low_52"   : safe(getattr(fi, "fifty_two_week_low",  None)),
-                "current_price" : safe(getattr(fi, "last_price",          None)),
+                "market_cap"    : safe(getattr(fi, "market_cap", None)),
+                "week_high_52"  : safe(high),
+                "week_low_52"   : safe(low),
+                "current_price" : safe(getattr(fi, "last_price", None)),
             }
-        pe  = info.get("trailingPE") or info.get("forwardPE")
-        eps = info.get("trailingEps") or info.get("forwardEps")
-        cur = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose")
-        return {
-            "ticker"        : ticker,
-            "name"          : info.get("shortName") or info.get("longName", ticker),
-            "sector"        : info.get("sector", "N/A"),
-            "pe_ratio"      : safe(pe),
-            "eps"           : safe(eps),
-            "market_cap"    : safe(info.get("marketCap")),
-            "week_high_52"  : safe(info.get("fiftyTwoWeekHigh")),
-            "week_low_52"   : safe(info.get("fiftyTwoWeekLow")),
-            "current_price" : safe(cur),
-        }
     except Exception:
-        return None
+        pass
+
+    # ── Attempt 3: compute 52-week range from 1y price history ─
+    # history() is the most reliable endpoint (curl_cffi session)
+    try:
+        hist = t.history(period="1y", auto_adjust=True)
+        if not hist.empty:
+            week52_high = round(float(hist["High"].max()),   2)
+            week52_low  = round(float(hist["Low"].min()),    2)
+            last_close  = round(float(hist["Close"].iloc[-1]), 2)
+            return {
+                "ticker"        : ticker,
+                "name"          : ticker,
+                "sector"        : "N/A",
+                "pe_ratio"      : "N/A",
+                "eps"           : "N/A",
+                "market_cap"    : "N/A",
+                "week_high_52"  : str(week52_high),
+                "week_low_52"   : str(week52_low),
+                "current_price" : str(last_close),
+            }
+    except Exception:
+        pass
+
+    return None
 
 
 def get_company_overview(ticker: str) -> dict:
