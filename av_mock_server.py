@@ -207,22 +207,54 @@ def _handle_overview(params):
     # Fallback: fast_info hits a lighter Yahoo endpoint, less rate-limited
     try:
         fi = _yf_ticker(ticker).fast_info
-        return {
-            "Symbol": ticker,
-            "Name": ticker,
-            "Sector": "N/A",
-            "Industry": "N/A",
-            "MarketCapitalization": safe(getattr(fi, "market_cap", None)),
-            "PERatio": "None",
-            "EPS": "None",
-            "52WeekHigh": safe(getattr(fi, "fifty_two_week_high", None)),
-            "52WeekLow": safe(getattr(fi, "fifty_two_week_low", None)),
-            "CurrentPrice": safe(getattr(fi, "last_price", None)),
-            "DividendYield": "None",
-            "Beta": "None",
-        }
+        high = getattr(fi, "fifty_two_week_high", None)
+        low  = getattr(fi, "fifty_two_week_low",  None)
+        if high is not None and low is not None:
+            return {
+                "Symbol": ticker,
+                "Name": ticker,
+                "Sector": "N/A",
+                "Industry": "N/A",
+                "MarketCapitalization": safe(getattr(fi, "market_cap", None)),
+                "PERatio": "None",
+                "EPS": "None",
+                "52WeekHigh": safe(high),
+                "52WeekLow": safe(low),
+                "CurrentPrice": safe(getattr(fi, "last_price", None)),
+                "DividendYield": "None",
+                "Beta": "None",
+            }
     except Exception:
-        return {}
+        pass
+
+    # Final fallback: compute 52-week range from 1-year price history.
+    # history() uses the v8 chart API which is far less rate-limited than
+    # the quote/fundamentals endpoints on cloud datacenter IPs.
+    try:
+        _rate_limit()
+        hist = _yf_ticker(ticker).history(period="1y", auto_adjust=True)
+        if not hist.empty:
+            week52_high = round(float(hist["High"].max()),   2)
+            week52_low  = round(float(hist["Low"].min()),    2)
+            last_close  = round(float(hist["Close"].iloc[-1]), 2)
+            return {
+                "Symbol": ticker,
+                "Name": ticker,
+                "Sector": "N/A",
+                "Industry": "N/A",
+                "MarketCapitalization": "None",
+                "PERatio": "None",
+                "EPS": "None",
+                "52WeekHigh": str(week52_high),
+                "52WeekLow":  str(week52_low),
+                "CurrentPrice": str(last_close),
+                "DividendYield": "None",
+                "Beta": "None",
+            }
+    except Exception:
+        pass
+
+    return {}
 
 
 def _handle_market_status(params):
