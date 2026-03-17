@@ -279,6 +279,24 @@ def _handle_overview(params):
     except Exception:
         pass
 
+    # Absolute last resort: call the REAL Alpha Vantage OVERVIEW endpoint.
+    # Direct call to alphavantage.co — NOT intercepted by the mock — so this
+    # works on Streamlit Cloud even when all yfinance endpoints are blocked.
+    import os as _os
+    _real_key = _os.getenv("ALPHAVANTAGE_API_KEY", "")
+    if _real_key and _real_key not in ("YOUR_KEY", "demo"):
+        try:
+            resp = _req_module.get(
+                f"https://www.alphavantage.co/query"
+                f"?function=OVERVIEW&symbol={ticker}&apikey={_real_key}",
+                timeout=15,
+            )
+            data = resp.json()
+            if data and "Name" in data:
+                return data  # already in the exact AV format expected by finagents
+        except Exception:
+            pass
+
     return {}
 
 
