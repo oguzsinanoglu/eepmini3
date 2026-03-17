@@ -338,6 +338,50 @@ def _handle_top_gainers_losers_fallback():
     }
 
 
+def _handle_time_series_daily(params):
+    """Serve TIME_SERIES_DAILY_ADJUSTED via yfinance for local/mock use."""
+    ticker     = params.get("symbol", "")
+    outputsize = params.get("outputsize", "compact")
+    if not ticker:
+        return {"Error Message": "Missing symbol parameter"}
+
+    try:
+        _rate_limit()
+        period = "5y" if outputsize == "full" else "1y"
+        hist = _yf_ticker(ticker).history(period=period, auto_adjust=True)
+        if hist.empty:
+            return {"Error Message": f"No data found for {ticker}"}
+
+        ts_data = {}
+        for idx, row in hist.iterrows():
+            date_str = str(idx.date())
+            close    = round(float(row["Close"]), 4)
+            ts_data[date_str] = {
+                "1. open"            : str(round(float(row["Open"]),  4)),
+                "2. high"            : str(round(float(row["High"]),  4)),
+                "3. low"             : str(round(float(row["Low"]),   4)),
+                "4. close"           : str(close),
+                "5. adjusted close"  : str(close),
+                "6. volume"          : str(int(row["Volume"])),
+                "7. dividend amount" : "0.0000",
+                "8. split coefficient": "1.0",
+            }
+
+        last_date = max(ts_data.keys()) if ts_data else ""
+        return {
+            "Meta Data": {
+                "1. Information": "Daily Time Series (Adjusted)",
+                "2. Symbol"     : ticker,
+                "3. Last Refreshed": last_date,
+                "4. Output Size": outputsize,
+                "5. Time Zone"  : "US/Eastern",
+            },
+            "Time Series (Daily)": ts_data,
+        }
+    except Exception as e:
+        return {"Error Message": str(e)}
+
+
 def _handle_news_sentiment(params):
     ticker = params.get("tickers", "")
     limit = int(params.get("limit", 5))

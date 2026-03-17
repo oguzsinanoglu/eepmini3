@@ -37,17 +37,97 @@ AVURL = MOCK_ALPHAVANTAGE_URL if os.getenv("USE_MOCK_AV_API") == "1" else ALPHAV
 # ── Database path — resolve relative to this file ────────────
 DB_PATH = str(Path(__file__).parent / "stocks.db")
 
-# Tickers that failed a yfinance download this session
-_DELISTED_CACHE: set = set()
+# ── Shared yfinance curl_cffi session (Chrome TLS fingerprint, avoids blocks) ─
+_YF_SESSION_LOCK = _threading.Lock()
+_YF_SESSION = None
 
-# Merge with av_mock_server's delisted set if already loaded (they share process memory)
-def _get_delisted_cache() -> set:
-    """Return the union of the local cache and av_mock_server's cache."""
+def _get_yf_session():
+    """Lazily create one shared curl_cffi session for all yfinance calls."""
+    global _YF_SESSION
+    if _YF_SESSION is not None:
+        return _YF_SESSION
+    with _YF_SESSION_LOCK:
+        if _YF_SESSION is None:
+            try:
+                from curl_cffi import requests as _curl_req
+                _YF_SESSION = _curl_req.Session(impersonate="chrome120")
+            except ImportError:
+                s = requests.Session()
+                s.headers.update({
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/122.0.0.0 Safari/537.36"
+                    )
+                })
+                _YF_SESSION = s
+    return _YF_SESSION
+
+
+def _get_price_via_av(ticker: str, period: str) -> dict | None:
+    """Fallback: fetch price change via Alpha Vantage TIME_SERIES_DAILY_ADJUSTED."""
+    from datetime import date, timedelta
+    today = date.today()
+    if period == "ytd":
+        cutoff = date(today.year, 1, 1)
+    elif period == "1mo":
+        cutoff = today - timedelta(days=35)
+    elif period == "3mo":
+        cutoff = today - timedelta(days=95)
+    elif period == "6mo":
+        cutoff = today - timedelta(days=185)
+    elif period == "1y":
+        cutoff = today - timedelta(days=370)
+    elif period == "2y":
+        cutoff = today - timedelta(days=740)
+    else:
+        cutoff = today - timedelta(days=370)
+
+    outputsize = "compact" if (today - cutoff).days <= 150 else "full"
     try:
-        import av_mock_server as _avms
-        return _DELISTED_CACHE | _avms._delisted_tickers
+        resp = requests.get(
+            f"{AVURL}/query",
+            params={
+                "function"  : "TIME_SERIES_DAILY_ADJUSTED",
+                "symbol"    : ticker,
+                "outputsize": outputsize,
+                "apikey"    : ALPHAVANTAGE_API_KEY,
+            },
+            timeout=20,
+        )
+        data = resp.json()
     except Exception:
-        return _DELISTED_CACHE
+        return None
+
+    ts = data.get("Time Series (Daily)")
+    if not ts:
+        return None
+
+    dates = sorted(ts.keys())  # ascending YYYY-MM-DD
+    cutoff_str = str(cutoff)
+    start_candidates = [d for d in dates if d >= cutoff_str]
+    if not start_candidates:
+        return None
+
+    start_date = start_candidates[0]
+    end_date   = dates[-1]
+    try:
+        start_price = float(ts[start_date].get("5. adjusted close",
+                            ts[start_date].get("4. close", 0)))
+        end_price   = float(ts[end_date].get(  "5. adjusted close",
+                            ts[end_date].get(  "4. close", 0)))
+    except (KeyError, ValueError):
+        return None
+
+    if start_price == 0:
+        return None
+
+    return {
+        "start_price": round(start_price, 2),
+        "end_price"  : round(end_price,   2),
+        "pct_change" : round((end_price - start_price) / start_price * 100, 2),
+        "period"     : period,
+    }
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -57,55 +137,36 @@ def _get_delisted_cache() -> set:
 def get_price_performance(tickers: list, period: str = "1y") -> dict:
     """% price change for a list of tickers over a period."""
     results = {}
-    to_download = [t for t in tickers if t not in _get_delisted_cache()]
-    for t in tickers:
-        if t in _get_delisted_cache():
-            results[t] = {"error": "No data — possibly delisted (cached)"}
 
-    if not to_download:
-        return results
-
-    _box = [None, None]
-    def _run():
+    def _fetch_one(ticker: str) -> tuple:
+        # Primary: yfinance Ticker.history() with shared curl_cffi session
         try:
-            _box[0] = yf.download(
-                to_download, period=period, progress=False,
-                auto_adjust=True, group_by="ticker"
-            )
-        except Exception as _e:
-            _box[1] = str(_e)
+            hist  = yf.Ticker(ticker, session=_get_yf_session()).history(
+                        period=period, auto_adjust=True)
+            close = hist["Close"].dropna() if not hist.empty else pd.Series([], dtype=float)
+            if not close.empty:
+                start = float(close.iloc[0])
+                end   = float(close.iloc[-1])
+                return ticker, {
+                    "start_price": round(start, 2),
+                    "end_price"  : round(end,   2),
+                    "pct_change" : round((end - start) / start * 100, 2),
+                    "period"     : period,
+                }
+        except Exception:
+            pass
 
-    _t = _threading.Thread(target=_run, daemon=True)
-    _t.start()
-    _t.join(timeout=30)
+        # Fallback: Alpha Vantage TIME_SERIES_DAILY_ADJUSTED
+        r = _get_price_via_av(ticker, period)
+        if r is not None:
+            return ticker, r
 
-    if _t.is_alive() or _box[1]:
-        msg = "Download timed out" if _t.is_alive() else _box[1]
-        for t in to_download:
-            _DELISTED_CACHE.add(t)
-            results[t] = {"error": msg}
-        return results
+        return ticker, {"error": f"No price data available for {ticker}"}
 
-    data = _box[0]
-    for ticker in to_download:
-        try:
-            td = data if len(to_download) == 1 else data[ticker]
-            close = td["Close"].dropna()
-            if close.empty:
-                _DELISTED_CACHE.add(ticker)
-                results[ticker] = {"error": "No data — possibly delisted"}
-                continue
-            start = float(close.iloc[0])
-            end   = float(close.iloc[-1])
-            results[ticker] = {
-                "start_price": round(start, 2),
-                "end_price"  : round(end,   2),
-                "pct_change" : round((end - start) / start * 100, 2),
-                "period"     : period,
-            }
-        except Exception as e:
-            _DELISTED_CACHE.add(ticker)
-            results[ticker] = {"error": str(e)}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(tickers), 5)) as ex:
+        for ticker, result in ex.map(_fetch_one, tickers):
+            results[ticker] = result
+
     return results
 
 

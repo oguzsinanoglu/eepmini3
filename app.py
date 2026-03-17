@@ -40,15 +40,17 @@ def _patch_mock_av_requests():
         _handle_market_status,
         _handle_top_gainers_losers,
         _handle_news_sentiment,
+        _handle_time_series_daily,
     )
 
     _orig_get = _req.get
 
     _HANDLERS = {
-        "OVERVIEW":           _handle_overview,
-        "MARKET_STATUS":      _handle_market_status,
-        "TOP_GAINERS_LOSERS": _handle_top_gainers_losers,
-        "NEWS_SENTIMENT":     _handle_news_sentiment,
+        "OVERVIEW":                       _handle_overview,
+        "MARKET_STATUS":                  _handle_market_status,
+        "TOP_GAINERS_LOSERS":             _handle_top_gainers_losers,
+        "NEWS_SENTIMENT":                 _handle_news_sentiment,
+        "TIME_SERIES_DAILY_ADJUSTED":     _handle_time_series_daily,
     }
 
     def _intercepted_get(url, **kwargs):
