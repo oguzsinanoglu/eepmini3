@@ -960,9 +960,10 @@ Specialists available:
 
 RULES:
 1. Only activate specialists that are STRICTLY needed to answer the question.
-   - Questions about P/E, EPS, market cap, or 52-week range (without sentiment) → "Fundamentals" ONLY.
+   - Questions about P/E, EPS, market cap, or 52-week range (without price performance and without sentiment) → "Fundamentals" ONLY.
    - Questions about price change / performance ONLY → "Price" ONLY.
    - Questions about news or sentiment ONLY (with specific tickers) → "Sentiment" ONLY.
+   - Questions asking for BOTH price/performance AND fundamentals (P/E, EPS, market cap) for specific tickers → activate BOTH "Price" AND "Fundamentals". Set "phased": false. Example: "Compare the market cap, P/E ratio, and 1-year performance of JPM, GS, BAC" → agents: ["Price", "Fundamentals"], Price task: "Get 1y price performance for JPM, GS, BAC.", Fundamentals task: "Get market cap and P/E ratio for JPM, GS, BAC."
    - Questions asking for BOTH price/performance AND news/sentiment for specific tickers → activate BOTH "Price" AND "Sentiment". Set "phased": false. Write a Price sub-task asking for the price change data and a Sentiment sub-task asking for the news sentiment. Example: "How has TSLA moved this month and what is its sentiment?" → agents: ["Price", "Sentiment"], Price task: "Get price performance for TSLA over 1mo period.", Sentiment task: "Get news sentiment for TSLA."
    - Only combine multiple specialists when the question explicitly asks for multiple domains in one answer.
 2. Detect a cross-domain dependency and use phased execution:
@@ -1085,8 +1086,8 @@ OUTPUT RULES:
 
 1. TABLE FORMAT — use ONLY when ALL of these are true:
    a) price_returns contains 2 or more tickers, AND
-   b) the original_question explicitly asks to COMPARE price % change across tickers (e.g. "which gained most", "top performers", "best/worst performing", "price change").
-   DO NOT use TABLE FORMAT for: 52-week range questions, P/E questions, sentiment questions, or any MULTI-CONDITION FILTER question (e.g. "dropped this month but grew this year", "fell recently but up this year"). Those use PROSE FORMAT.
+   b) the original_question explicitly asks to COMPARE price % change across tickers (e.g. "which gained most", "top performers", "best/worst performing", "price change") and does NOT also ask for market cap or other fundamentals.
+   DO NOT use TABLE FORMAT for: 52-week range questions, questions that ask for market cap or P/E alongside performance, sentiment questions, or any MULTI-CONDITION FILTER question. Those use PROSE FORMAT.
    - Output exactly one line per ticker. FORMAT: TICKER: +X.XX% | P/E X.XX | Sentiment: Label (score)
    - Use the exact float from price_returns for %. Prefix positive with +.
    - Get P/E and Sentiment from specialist_answers. Write N/A only if truly absent.
@@ -1098,6 +1099,9 @@ OUTPUT RULES:
    - Always include the company name in parentheses after the ticker. If not available, omit the parentheses.
    - Include only the fields the question asks about plus any extra fields present in the specialist answer. Omit fields that are "None" or "N/A".
    - No intro sentence, no conclusion, no blank lines between entries.
+
+3. PROSE FORMAT — use for all other questions, including questions that ask for BOTH price performance AND fundamentals (market cap, P/E, etc.) for the same tickers:
+   - For PRICE + FUNDAMENTALS comparison (e.g. "compare market cap, P/E, and 1-year performance of JPM, GS, BAC"): output one line per ticker with ALL requested fields. Format: TICKER (Company Name): 1y +X.XX% | Market Cap $X.XXB | P/E X.XX. Use exact values from both price_returns and specialist_answers. Omit fields that are truly N/A.
 
 3. PROSE FORMAT — use for all other questions:
    - Include ALL key numeric values from the specialist answers.
