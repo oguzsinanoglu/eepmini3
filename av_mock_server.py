@@ -232,18 +232,33 @@ def _handle_overview(params):
     # the quote/fundamentals endpoints on cloud datacenter IPs.
     try:
         _rate_limit()
-        hist = _yf_ticker(ticker).history(period="1y", auto_adjust=True)
+        # Reuse the same Ticker instance so fast_info reads from the cached
+        # chart data already fetched by history() — no extra network call.
+        t = _yf_ticker(ticker)
+        hist = t.history(period="1y", auto_adjust=True)
         if not hist.empty:
             week52_high = round(float(hist["High"].max()),   2)
             week52_low  = round(float(hist["Low"].min()),    2)
             last_close  = round(float(hist["Close"].iloc[-1]), 2)
 
-            # Try fast_info for market cap (chart endpoint, less rate-limited)
+            # fast_info.market_cap reads from the chart meta already in memory
             market_cap = "None"
+            pe_ratio   = "None"
+            eps        = "None"
             try:
-                mc = getattr(_yf_ticker(ticker).fast_info, "market_cap", None)
+                fi = t.fast_info
+                mc = getattr(fi, "market_cap", None)
                 if mc:
                     market_cap = str(int(mc))
+            except Exception:
+                pass
+
+            # trailingPE is not always in chart meta; compute from EPS if possible
+            try:
+                meta = getattr(t, '_history_metadata', {}) or {}
+                tp = meta.get("trailingPE")
+                if tp:
+                    pe_ratio = str(round(float(tp), 4))
             except Exception:
                 pass
 
@@ -253,8 +268,8 @@ def _handle_overview(params):
                 "Sector": "N/A",
                 "Industry": "N/A",
                 "MarketCapitalization": market_cap,
-                "PERatio": "None",
-                "EPS": "None",
+                "PERatio": pe_ratio,
+                "EPS": eps,
                 "52WeekHigh": str(week52_high),
                 "52WeekLow":  str(week52_low),
                 "CurrentPrice": str(last_close),

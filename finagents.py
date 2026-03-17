@@ -321,9 +321,9 @@ def get_company_overview(ticker: str) -> dict:
                 "week_low_52"   : _av_field(data, "52WeekLow"),
                 "current_price" : _av_field(data, "CurrentPrice"),
             }
-            # If the mock fell back to history() it has no market_cap or pe_ratio;
-            # try the yfinance path to fill those in.
-            if result["market_cap"] == "N/A" and result["pe_ratio"] == "N/A":
+            # If the mock fell back to history() it may lack market_cap or pe_ratio;
+            # try the yfinance path to fill in whichever fields are N/A.
+            if result["market_cap"] == "N/A" or result["pe_ratio"] == "N/A":
                 yf_result = _overview_from_yf(ticker)
                 if yf_result:
                     if yf_result.get("market_cap", "N/A") != "N/A":
