@@ -875,8 +875,9 @@ Specialists available:
 RULES:
 1. Only activate specialists that are STRICTLY needed to answer the question.
    - Questions about P/E, EPS, market cap, or 52-week range (without sentiment) → "Fundamentals" ONLY.
-   - Questions about price change / performance → "Price" ONLY (unless also asking for fundamentals).
-   - Questions about news or sentiment (with specific tickers) → "Sentiment" ONLY.
+   - Questions about price change / performance ONLY → "Price" ONLY.
+   - Questions about news or sentiment ONLY (with specific tickers) → "Sentiment" ONLY.
+   - Questions asking for BOTH price/performance AND news/sentiment for specific tickers → activate BOTH "Price" AND "Sentiment". Set "phased": false. Write a Price sub-task asking for the price change data and a Sentiment sub-task asking for the news sentiment. Example: "How has TSLA moved this month and what is its sentiment?" → agents: ["Price", "Sentiment"], Price task: "Get price performance for TSLA over 1mo period.", Sentiment task: "Get news sentiment for TSLA."
    - Only combine multiple specialists when the question explicitly asks for multiple domains in one answer.
 2. Detect a cross-domain dependency and use phased execution:
    a) Price-then-fundamentals/sentiment: question ranks/filters by price/return then asks fundamentals or sentiment of top results → set "phased": true, "phase1_agent": "Price". Examples: "top 3 semiconductor stocks by 1-year return, what are their P/E ratios", "best energy stocks this year, show their news sentiment".
