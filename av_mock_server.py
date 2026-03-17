@@ -74,6 +74,13 @@ app = Flask(__name__)
 
 _INFO_CACHE_TTL = 300  # seconds; re-fetch after 5 minutes or on failure
 _info_cache: dict = {}  # ticker -> (fetched_at: float, data: dict | None)
+
+# ── Real AV OVERVIEW rate limiter (5 calls/minute free tier) ─────────────────
+# Pace OVERVIEW calls to alphavantage.co so rapid multi-ticker lookups
+# (e.g., JPM + GS + BAC in one query) don't get 429'd by AV's 5-req/min cap.
+_AV_OVERVIEW_LOCK     = threading.Lock()
+_LAST_AV_OVERVIEW_TIME: list = [0.0]   # mutable container for module-level state
+_AV_OVERVIEW_MIN_GAP  = 13.0           # seconds; keeps burst rate under 5/min
 _delisted_tickers: set = set()  # tickers that returned 404; never retried
 
 def _get_info(ticker):
@@ -127,8 +134,23 @@ def _get_info(ticker):
                 ks  = combined.get("defaultKeyStatistics", {})
                 pe  = sd.get("trailingPE") or sd.get("forwardPE")
                 eps = ks.get("trailingEps") or ks.get("forwardEps")
-                if pe is not None:
-                    fi = t.fast_info
+                # Use marketCap directly from summaryDetail (same HTTP request) —
+                # avoids an extra fast_info network call which is more rate-limited.
+                mc = sd.get("marketCap")
+                if mc is None:
+                    try:
+                        mc = getattr(t.fast_info, "market_cap", None)
+                    except Exception:
+                        pass
+                if pe is not None or mc is not None:
+                    # 52-week range from fast_info (light chart-meta endpoint)
+                    wk52h = wk52l = None
+                    try:
+                        fi    = t.fast_info
+                        wk52h = getattr(fi, "fifty_two_week_high", None)
+                        wk52l = getattr(fi, "fifty_two_week_low",  None)
+                    except Exception:
+                        pass
                     info = {
                         "shortName"       : ticker,
                         "sector"          : "N/A",
@@ -136,9 +158,9 @@ def _get_info(ticker):
                         "trailingPE"      : sd.get("trailingPE"),
                         "forwardPE"       : sd.get("forwardPE"),
                         "trailingEps"     : eps,
-                        "marketCap"       : getattr(fi, "market_cap",         None),
-                        "fiftyTwoWeekHigh": getattr(fi, "fifty_two_week_high", None),
-                        "fiftyTwoWeekLow" : getattr(fi, "fifty_two_week_low",  None),
+                        "marketCap"       : mc,
+                        "fiftyTwoWeekHigh": wk52h,
+                        "fiftyTwoWeekLow" : wk52l,
                         "beta"            : sd.get("beta"),
                         "dividendYield"   : sd.get("dividendYield"),
                     }
@@ -227,21 +249,20 @@ def _handle_overview(params):
     except Exception:
         pass
 
-    # Final fallback: compute 52-week range from 1-year price history.
+    # History fallback: compute 52-week range from 1-year price history.
     # history() uses the v8 chart API which is far less rate-limited than
     # the quote/fundamentals endpoints on cloud datacenter IPs.
+    _hist_week52_high = _hist_week52_low = _hist_last_close = None  # may be used below
     try:
-        _rate_limit()
-        # Reuse the same Ticker instance so fast_info reads from the cached
-        # chart data already fetched by history() — no extra network call.
+        # NOTE: _rate_limit() was removed — it was undefined and caused a silent
+        # NameError that skipped this entire block. Do not add it back.
         t = _yf_ticker(ticker)
         hist = t.history(period="1y", auto_adjust=True)
         if not hist.empty:
-            week52_high = round(float(hist["High"].max()),   2)
-            week52_low  = round(float(hist["Low"].min()),    2)
-            last_close  = round(float(hist["Close"].iloc[-1]), 2)
+            _hist_week52_high = round(float(hist["High"].max()),   2)
+            _hist_week52_low  = round(float(hist["Low"].min()),    2)
+            _hist_last_close  = round(float(hist["Close"].iloc[-1]), 2)
 
-            # fast_info.market_cap reads from the chart meta already in memory
             market_cap = "None"
             pe_ratio   = "None"
             eps        = "None"
@@ -253,38 +274,48 @@ def _handle_overview(params):
             except Exception:
                 pass
 
-            # trailingPE is not always in chart meta; compute from EPS if possible
             try:
-                meta = getattr(t, '_history_metadata', {}) or {}
+                meta = getattr(t, "_history_metadata", {}) or {}
                 tp = meta.get("trailingPE")
                 if tp:
                     pe_ratio = str(round(float(tp), 4))
             except Exception:
                 pass
 
-            return {
-                "Symbol": ticker,
-                "Name": ticker,
-                "Sector": "N/A",
-                "Industry": "N/A",
-                "MarketCapitalization": market_cap,
-                "PERatio": pe_ratio,
-                "EPS": eps,
-                "52WeekHigh": str(week52_high),
-                "52WeekLow":  str(week52_low),
-                "CurrentPrice": str(last_close),
-                "DividendYield": "None",
-                "Beta": "None",
-            }
+            # Only return here if we have at least one meaningful fundamental.
+            # If both are still "None", fall through to the real AV OVERVIEW
+            # call below rather than returning an incomplete record.
+            if market_cap != "None" or pe_ratio != "None":
+                return {
+                    "Symbol": ticker,
+                    "Name": ticker,
+                    "Sector": "N/A",
+                    "Industry": "N/A",
+                    "MarketCapitalization": market_cap,
+                    "PERatio": pe_ratio,
+                    "EPS": eps,
+                    "52WeekHigh": str(_hist_week52_high),
+                    "52WeekLow":  str(_hist_week52_low),
+                    "CurrentPrice": str(_hist_last_close),
+                    "DividendYield": "None",
+                    "Beta": "None",
+                }
     except Exception:
         pass
 
     # Absolute last resort: call the REAL Alpha Vantage OVERVIEW endpoint.
     # Direct call to alphavantage.co — NOT intercepted by the mock — so this
     # works on Streamlit Cloud even when all yfinance endpoints are blocked.
+    # AV free tier: 5 requests/minute. We pace calls to avoid rate-limit errors
+    # when processing multiple tickers in the same request (e.g., JPM, GS, BAC).
     import os as _os
     _real_key = _os.getenv("ALPHAVANTAGE_API_KEY", "")
     if _real_key and _real_key not in ("YOUR_KEY", "demo"):
+        with _AV_OVERVIEW_LOCK:
+            elapsed = time.time() - _LAST_AV_OVERVIEW_TIME[0]
+            if elapsed < _AV_OVERVIEW_MIN_GAP:
+                time.sleep(_AV_OVERVIEW_MIN_GAP - elapsed)
+            _LAST_AV_OVERVIEW_TIME[0] = time.time()
         try:
             resp = _req_module.get(
                 f"https://www.alphavantage.co/query"
@@ -293,9 +324,30 @@ def _handle_overview(params):
             )
             data = resp.json()
             if data and "Name" in data:
+                # Patch in history-computed 52-week values if AV doesn't have them
+                if _hist_week52_high is not None and not data.get("52WeekHigh"):
+                    data["52WeekHigh"] = str(_hist_week52_high)
+                    data["52WeekLow"]  = str(_hist_week52_low)
                 return data  # already in the exact AV format expected by finagents
         except Exception:
             pass
+
+    # Nothing worked — return 52-week-only skeleton if history ran successfully.
+    if _hist_week52_high is not None:
+        return {
+            "Symbol": ticker,
+            "Name": ticker,
+            "Sector": "N/A",
+            "Industry": "N/A",
+            "MarketCapitalization": "None",
+            "PERatio": "None",
+            "EPS": "None",
+            "52WeekHigh": str(_hist_week52_high),
+            "52WeekLow":  str(_hist_week52_low),
+            "CurrentPrice": str(_hist_last_close) if _hist_last_close else "None",
+            "DividendYield": "None",
+            "Beta": "None",
+        }
 
     return {}
 
@@ -421,7 +473,6 @@ def _handle_time_series_daily(params):
         return {"Error Message": "Missing symbol parameter"}
 
     try:
-        _rate_limit()
         period = "5y" if outputsize == "full" else "1y"
         hist = _yf_ticker(ticker).history(period=period, auto_adjust=True)
         if hist.empty:
