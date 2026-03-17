@@ -296,25 +296,43 @@ def _overview_from_yf(ticker: str) -> dict | None:
     return None
 
 
+def _av_field(data: dict, key: str) -> str:
+    """Get field from AV/mock response; treat missing, 'None', and '0' as N/A."""
+    v = data.get(key, "N/A")
+    return "N/A" if v in (None, "None", "", "0") else str(v)
+
+
 def get_company_overview(ticker: str) -> dict:
     """Fundamentals for one stock: P/E, EPS, market cap, 52-week range."""
-    # Primary: Alpha Vantage OVERVIEW
+    # Primary: Alpha Vantage OVERVIEW (or mock interceptor)
     try:
         url  = (f"{AVURL}/query"
                 f"?function=OVERVIEW&symbol={ticker}&apikey={ALPHAVANTAGE_API_KEY}")
         data = requests.get(url, timeout=10).json()
         if data and "Name" in data:
-            return {
+            result = {
                 "ticker"        : ticker,
-                "name"          : data.get("Name", ""),
-                "sector"        : data.get("Sector", ""),
-                "pe_ratio"      : data.get("PERatio", "N/A"),
-                "eps"           : data.get("EPS", "N/A"),
-                "market_cap"    : data.get("MarketCapitalization", "N/A"),
-                "week_high_52"  : data.get("52WeekHigh", "N/A"),
-                "week_low_52"   : data.get("52WeekLow", "N/A"),
-                "current_price" : data.get("CurrentPrice", "N/A"),
+                "name"          : data.get("Name") or ticker,
+                "sector"        : data.get("Sector", "N/A"),
+                "pe_ratio"      : _av_field(data, "PERatio"),
+                "eps"           : _av_field(data, "EPS"),
+                "market_cap"    : _av_field(data, "MarketCapitalization"),
+                "week_high_52"  : _av_field(data, "52WeekHigh"),
+                "week_low_52"   : _av_field(data, "52WeekLow"),
+                "current_price" : _av_field(data, "CurrentPrice"),
             }
+            # If the mock fell back to history() it has no market_cap or pe_ratio;
+            # try the yfinance path to fill those in.
+            if result["market_cap"] == "N/A" and result["pe_ratio"] == "N/A":
+                yf_result = _overview_from_yf(ticker)
+                if yf_result:
+                    if yf_result.get("market_cap", "N/A") != "N/A":
+                        result["market_cap"] = yf_result["market_cap"]
+                    if yf_result.get("pe_ratio", "N/A") != "N/A":
+                        result["pe_ratio"] = yf_result["pe_ratio"]
+                    if yf_result.get("name", ticker) != ticker:
+                        result["name"] = yf_result["name"]
+            return result
     except Exception:
         pass
 

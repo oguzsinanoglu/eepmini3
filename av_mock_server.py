@@ -237,12 +237,22 @@ def _handle_overview(params):
             week52_high = round(float(hist["High"].max()),   2)
             week52_low  = round(float(hist["Low"].min()),    2)
             last_close  = round(float(hist["Close"].iloc[-1]), 2)
+
+            # Try fast_info for market cap (chart endpoint, less rate-limited)
+            market_cap = "None"
+            try:
+                mc = getattr(_yf_ticker(ticker).fast_info, "market_cap", None)
+                if mc:
+                    market_cap = str(int(mc))
+            except Exception:
+                pass
+
             return {
                 "Symbol": ticker,
                 "Name": ticker,
                 "Sector": "N/A",
                 "Industry": "N/A",
-                "MarketCapitalization": "None",
+                "MarketCapitalization": market_cap,
                 "PERatio": "None",
                 "EPS": "None",
                 "52WeekHigh": str(week52_high),
