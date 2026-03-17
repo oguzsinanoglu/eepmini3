@@ -217,27 +217,73 @@ def query_local_db(sql: str) -> dict:
         return {"error": str(e)}
 
 
+def _overview_from_yf(ticker: str) -> dict | None:
+    """Fetch company overview directly from yfinance using the shared curl_cffi session."""
+    def safe(v):
+        return "N/A" if v is None else str(v)
+    try:
+        t    = yf.Ticker(ticker, session=_get_yf_session())
+        info = t.info or {}
+        if not info.get("shortName") and not info.get("longName"):
+            # Try fast_info as last resort (lighter endpoint)
+            fi = t.fast_info
+            return {
+                "ticker"        : ticker,
+                "name"          : ticker,
+                "sector"        : "N/A",
+                "pe_ratio"      : "N/A",
+                "eps"           : "N/A",
+                "market_cap"    : safe(getattr(fi, "market_cap",          None)),
+                "week_high_52"  : safe(getattr(fi, "fifty_two_week_high", None)),
+                "week_low_52"   : safe(getattr(fi, "fifty_two_week_low",  None)),
+                "current_price" : safe(getattr(fi, "last_price",          None)),
+            }
+        pe  = info.get("trailingPE") or info.get("forwardPE")
+        eps = info.get("trailingEps") or info.get("forwardEps")
+        cur = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose")
+        return {
+            "ticker"        : ticker,
+            "name"          : info.get("shortName") or info.get("longName", ticker),
+            "sector"        : info.get("sector", "N/A"),
+            "pe_ratio"      : safe(pe),
+            "eps"           : safe(eps),
+            "market_cap"    : safe(info.get("marketCap")),
+            "week_high_52"  : safe(info.get("fiftyTwoWeekHigh")),
+            "week_low_52"   : safe(info.get("fiftyTwoWeekLow")),
+            "current_price" : safe(cur),
+        }
+    except Exception:
+        return None
+
+
 def get_company_overview(ticker: str) -> dict:
     """Fundamentals for one stock: P/E, EPS, market cap, 52-week range."""
+    # Primary: Alpha Vantage OVERVIEW
     try:
         url  = (f"{AVURL}/query"
                 f"?function=OVERVIEW&symbol={ticker}&apikey={ALPHAVANTAGE_API_KEY}")
         data = requests.get(url, timeout=10).json()
-        if not data or "Name" not in data:
-            return {"error": f"No overview data found for ticker '{ticker}'"}
-        return {
-            "ticker"        : ticker,
-            "name"          : data.get("Name", ""),
-            "sector"        : data.get("Sector", ""),
-            "pe_ratio"      : data.get("PERatio", "N/A"),
-            "eps"           : data.get("EPS", "N/A"),
-            "market_cap"    : data.get("MarketCapitalization", "N/A"),
-            "week_high_52"  : data.get("52WeekHigh", "N/A"),
-            "week_low_52"   : data.get("52WeekLow", "N/A"),
-            "current_price" : data.get("CurrentPrice", "N/A"),
-        }
-    except Exception as e:
-        return {"error": str(e)}
+        if data and "Name" in data:
+            return {
+                "ticker"        : ticker,
+                "name"          : data.get("Name", ""),
+                "sector"        : data.get("Sector", ""),
+                "pe_ratio"      : data.get("PERatio", "N/A"),
+                "eps"           : data.get("EPS", "N/A"),
+                "market_cap"    : data.get("MarketCapitalization", "N/A"),
+                "week_high_52"  : data.get("52WeekHigh", "N/A"),
+                "week_low_52"   : data.get("52WeekLow", "N/A"),
+                "current_price" : data.get("CurrentPrice", "N/A"),
+            }
+    except Exception:
+        pass
+
+    # Fallback: yfinance with shared curl_cffi session
+    yf_result = _overview_from_yf(ticker)
+    if yf_result is not None:
+        return yf_result
+
+    return {"error": f"No overview data found for ticker '{ticker}'"}
 
 
 def get_tickers_by_sector(sector: str) -> dict:
