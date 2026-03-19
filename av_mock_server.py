@@ -226,33 +226,29 @@ def _handle_overview(params):
             "Beta": safe(info.get("beta")),
         }
 
-    # Fallback: fast_info hits a lighter Yahoo endpoint, less rate-limited
+    # Fallback: fast_info hits a lighter Yahoo endpoint, less rate-limited.
+    # Save 52-week/price data but do NOT return early — fall through so the real
+    # AV OVERVIEW call below can supply PERatio (fast_info never has it).
+    _fi_52_high = _fi_52_low = _fi_market_cap = _fi_last_price = None
     try:
         fi = _yf_ticker(ticker).fast_info
         high = getattr(fi, "fifty_two_week_high", None)
         low  = getattr(fi, "fifty_two_week_low",  None)
         if high is not None and low is not None:
-            return {
-                "Symbol": ticker,
-                "Name": ticker,
-                "Sector": "N/A",
-                "Industry": "N/A",
-                "MarketCapitalization": safe(getattr(fi, "market_cap", None)),
-                "PERatio": "None",
-                "EPS": "None",
-                "52WeekHigh": safe(high),
-                "52WeekLow": safe(low),
-                "CurrentPrice": safe(getattr(fi, "last_price", None)),
-                "DividendYield": "None",
-                "Beta": "None",
-            }
+            _fi_52_high    = high
+            _fi_52_low     = low
+            _fi_market_cap = getattr(fi, "market_cap", None)
+            _fi_last_price = getattr(fi, "last_price", None)
     except Exception:
         pass
 
     # History fallback: compute 52-week range from 1-year price history.
     # history() uses the v8 chart API which is far less rate-limited than
     # the quote/fundamentals endpoints on cloud datacenter IPs.
-    _hist_week52_high = _hist_week52_low = _hist_last_close = None  # may be used below
+    # Seed from fast_info so the real AV call further below can patch them in.
+    _hist_week52_high = _fi_52_high
+    _hist_week52_low  = _fi_52_low
+    _hist_last_close  = _fi_last_price  # may be used below
     try:
         # NOTE: _rate_limit() was removed — it was undefined and caused a silent
         # NameError that skipped this entire block. Do not add it back.
@@ -282,10 +278,10 @@ def _handle_overview(params):
             except Exception:
                 pass
 
-            # Only return here if we have at least one meaningful fundamental.
-            # If both are still "None", fall through to the real AV OVERVIEW
-            # call below rather than returning an incomplete record.
-            if market_cap != "None" or pe_ratio != "None":
+            # Only return here if we actually retrieved a PE ratio.
+            # If PE is still "None", fall through to the real AV OVERVIEW
+            # call below which will supply it.
+            if pe_ratio != "None":
                 return {
                     "Symbol": ticker,
                     "Name": ticker,
